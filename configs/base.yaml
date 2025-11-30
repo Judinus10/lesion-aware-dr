@@ -1,0 +1,29 @@
+project_name: "lesion_aware_dr"
+run_name: "baseline_efficientnet"
+
+paths:
+  data_dir: "data"
+  raw_dir: "data/raw"
+  processed_dir: "data/processed"
+  outputs_dir: "outputs"
+  checkpoints_dir: "outputs/checkpoints"
+
+training:
+  seed: 42
+  epochs: 30
+  batch_size: 16
+  num_workers: 4
+  lr: 1e-4
+  weight_decay: 1e-5
+  optimizer: "adamw"
+  scheduler: "cosine"
+
+model:
+  backbone: "efficientnet_b3"
+  num_classes: 5
+  pretrained: true
+
+logging:
+  use_wandb: true
+  wandb_project: "lesion_aware_dr"
+  wandb_entity: null   # your username or team, or null

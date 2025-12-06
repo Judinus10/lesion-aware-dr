@@ -27,3 +27,13 @@ logging:
   use_wandb: true
   wandb_project: "lesion_aware_dr"
   wandb_entity: null   # your username or team, or null
+
+data:
+  dataset: "aptos"
+  train_csv: "data/raw/aptos_train.csv"
+  val_csv: "data/raw/aptos_val.csv"
+  image_size: 512
+  augment: true
+
+loss:
+  name: "ce"          # ce | focal | cb_focal

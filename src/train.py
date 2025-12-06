@@ -9,11 +9,11 @@ from torch import nn, optim
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch.utils.data import DataLoader
 
-from utils.logger import get_logger
-from utils.seed import set_seed
+from src.utils.logger import get_logger
+from src.utils.seed import set_seed
 
 from data.dr_datamodule import DRDataModule
-from losses.classifier import get_loss
+from src.losses.classifier import get_loss
 
 try:
     from torchmetrics.classification import MulticlassAccuracy, MulticlassF1Score
@@ -42,6 +42,13 @@ def build_model(cfg):
 def main():
     # 1) Load config
     cfg = load_config()
+
+    # 1) Load config
+    cfg = load_config()
+
+    # 🔧 Force lr and weight_decay to be float (numbers, not text)
+    cfg.training.lr = float(cfg.training.lr)
+    cfg.training.weight_decay = float(cfg.training.weight_decay)
 
     # 2) Create output directories
     Path(cfg.paths.outputs_dir).mkdir(parents=True, exist_ok=True)

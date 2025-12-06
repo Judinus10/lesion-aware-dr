@@ -8,32 +8,53 @@ paths:
   outputs_dir: "outputs"
   checkpoints_dir: "outputs/checkpoints"
 
-training:
-  seed: 42
-  epochs: 30
-  batch_size: 16
-  num_workers: 4
-  lr: 1e-4
-  weight_decay: 1e-5
-  optimizer: "adamw"
-  scheduler: "cosine"
+# training:
+#   seed: 42
+#   epochs: 30
+#   batch_size: 16
+#   num_workers: 4
+#   lr: 1e-4          # or 0.0001
+#   weight_decay: 1e-5  # or 0.00001
+#   optimizer: "adamw"
+#   scheduler: "cosine"
+
+# model:
+#   backbone: "efficientnet_b3"
+#   num_classes: 5
+#   pretrained: true
+
+# logging:
+#   use_wandb: false
+#   wandb_project: "lesion_aware_dr"
+#   wandb_entity: null   # your username or team, or null
+
+# data:
+#   dataset: "aptos"
+#   train_csv: "data/raw/aptos_train.csv"
+#   val_csv: "data/raw/aptos_val.csv"
+#   image_size: 512
+#   augment: true
 
 model:
-  backbone: "efficientnet_b3"
+  backbone: efficientnet_b0   # smaller model
   num_classes: 5
   pretrained: true
 
-logging:
-  use_wandb: true
-  wandb_project: "lesion_aware_dr"
-  wandb_entity: null   # your username or team, or null
-
 data:
-  dataset: "aptos"
-  train_csv: "data/raw/aptos_train.csv"
-  val_csv: "data/raw/aptos_val.csv"
-  image_size: 512
-  augment: true
+  image_size: 224             # smaller images (faster)
+
+training:
+  seed: 42
+  epochs: 2                   # just test 2 epochs
+  batch_size: 4               # smaller batch
+  num_workers: 0              # important on Windows: avoid multiprocessing
+  lr: 1e-4
+  weight_decay: 1e-5
+  optimizer: adamw
+  scheduler: cosine
+
+logging:
+  use_wandb: false            # turn off WandB for now
 
 loss:
   name: "ce"          # ce | focal | cb_focal
@@ -48,3 +69,6 @@ data:
 
 loss:
   name: "ce"              # ce | focal | cb_focal
+
+data:
+  image_size: 512

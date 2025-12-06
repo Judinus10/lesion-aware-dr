@@ -37,3 +37,14 @@ data:
 
 loss:
   name: "ce"          # ce | focal | cb_focal
+
+data:
+  train_csv: "data/raw/train.csv"
+  val_csv: "data/raw/val.csv"
+  image_dir: "data/raw/images"
+  image_col: "image"      # column name in CSV that holds image filename
+  label_col: "label"      # column name in CSV that holds label (0..4)
+  image_size: 512
+
+loss:
+  name: "ce"              # ce | focal | cb_focal

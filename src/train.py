@@ -1,52 +1,50 @@
-import os
+import argparse
 from pathlib import Path
 
 import yaml
 from omegaconf import OmegaConf
 
 import torch
-from torch import nn, optim
+from torch import optim
 from torch.optim.lr_scheduler import CosineAnnealingLR
-from torch.utils.data import DataLoader
 
 from src.utils.logger import get_logger
 from src.utils.seed import set_seed
-
-from data.dr_datamodule import DRDataModule
+from src.models import build_model
+from src.data.dr_datamodule import DRDataModule
 from src.losses.classifier import get_loss
 
 try:
     from torchmetrics.classification import MulticlassAccuracy, MulticlassF1Score
     _HAS_TORCHMETRICS = True
-except ImportError:
+except Exception:
     _HAS_TORCHMETRICS = False
 
 
-def load_config(cfg_path: str = "configs/base.yaml"):
+def load_config(cfg_path: str) -> OmegaConf:
     with open(cfg_path, "r") as f:
-        cfg = yaml.safe_load(f)
-    return OmegaConf.create(cfg)
+        cfg_dict = yaml.safe_load(f)
+    return OmegaConf.create(cfg_dict)
 
 
-def build_model(cfg):
-    import timm
-
-    model = timm.create_model(
-        cfg.model.backbone,
-        pretrained=cfg.model.pretrained,
-        num_classes=cfg.model.num_classes,
+def parse_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--cfg_path",
+        type=str,
+        default="configs/base.yaml",
+        help="Path to YAML config file.",
     )
-    return model
+    return parser.parse_args()
 
 
 def main():
-    # 1) Load config
-    cfg = load_config()
+    args = parse_args()
 
     # 1) Load config
-    cfg = load_config()
+    cfg = load_config(args.cfg_path)
 
-    # 🔧 Force lr and weight_decay to be float (numbers, not text)
+    # Ensure lr & weight_decay are floats
     cfg.training.lr = float(cfg.training.lr)
     cfg.training.weight_decay = float(cfg.training.weight_decay)
 
@@ -54,10 +52,10 @@ def main():
     Path(cfg.paths.outputs_dir).mkdir(parents=True, exist_ok=True)
     Path(cfg.paths.checkpoints_dir).mkdir(parents=True, exist_ok=True)
 
-    # 3) Set seed
+    # 3) Seed
     set_seed(cfg.training.seed)
 
-    # 4) Setup logger
+    # 4) Logger
     logger = get_logger("train")
     logger.info("Starting training script...")
     logger.info(f"Config:\n{OmegaConf.to_yaml(cfg)}")
@@ -65,7 +63,7 @@ def main():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logger.info(f"Using device: {device}")
 
-    # 5) Optional: Initialize WandB
+    # 5) Optional: WandB
     if cfg.logging.use_wandb:
         import wandb
 
@@ -78,14 +76,19 @@ def main():
     else:
         wandb = None
 
-    # 6) DataModule (build loaders)
+    # 6) Data
     datamodule = DRDataModule(cfg)
-    train_loader, val_loader = datamodule.train_dataloader(), datamodule.val_dataloader()
+    train_loader = datamodule.train_dataloader()
+    val_loader = datamodule.val_dataloader()
 
     # 7) Model, loss, optimizer, scheduler
-    model = build_model(cfg).to(device)
+    model = build_model(
+        backbone=cfg.model.backbone,
+        num_classes=cfg.model.num_classes,
+        pretrained=cfg.model.pretrained,
+    ).to(device)
 
-    criterion = get_loss(cfg)  # picks CE / focal / cb-focal based on cfg
+    criterion = get_loss(cfg)
     optimizer = optim.AdamW(
         model.parameters(),
         lr=cfg.training.lr,
@@ -100,12 +103,11 @@ def main():
     if _HAS_TORCHMETRICS:
         acc_metric = MulticlassAccuracy(num_classes=cfg.model.num_classes).to(device)
         f1_metric = MulticlassF1Score(
-            num_classes=cfg.model.num_classes,
-            average="macro",
+            num_classes=cfg.model.num_classes, average="macro"
         ).to(device)
     else:
         acc_metric = f1_metric = None
-        logger.warning("torchmetrics not installed; accuracy/F1 will not be logged.")
+        logger.warning("torchmetrics not installed: val_acc/val_f1 will be 0.0")
 
     # 8) Training loop
     best_val_loss = float("inf")
@@ -131,7 +133,6 @@ def main():
         # ---- Validation ----
         model.eval()
         val_loss = 0.0
-
         if acc_metric is not None:
             acc_metric.reset()
             f1_metric.reset()
@@ -180,11 +181,11 @@ def main():
                 }
             )
 
-        # Save best checkpoint
+        # Save best
         if epoch_val_loss < best_val_loss:
             best_val_loss = epoch_val_loss
             ckpt_path = Path(cfg.paths.checkpoints_dir) / "best_model.pt"
-            torch.save({"model_state": model.state_dict(), "epoch": epoch}, ckpt_path)
+            torch.save({"epoch": epoch, "model_state": model.state_dict()}, ckpt_path)
             logger.info(f"New best model saved to {ckpt_path}")
 
     if wandb is not None:

@@ -1,7 +1,8 @@
 import logging
 from pathlib import Path
 
-def get_logger(name: str = "dr_project", log_dir: str = "outputs/logs") -> logging.Logger:
+
+def get_logger(name: str = "lesion_aware_dr", log_dir: str = "outputs/logs") -> logging.Logger:
     Path(log_dir).mkdir(parents=True, exist_ok=True)
 
     logger = logging.getLogger(name)
@@ -11,16 +12,20 @@ def get_logger(name: str = "dr_project", log_dir: str = "outputs/logs") -> loggi
     if logger.handlers:
         return logger
 
-    # Console handler
+    fmt = logging.Formatter(
+        "[%(asctime)s] [%(levelname)s] %(message)s",
+        "%Y-%m-%d %H:%M:%S",
+    )
+
+    # Console
     ch = logging.StreamHandler()
     ch.setLevel(logging.INFO)
-    ch_fmt = logging.Formatter("[%(asctime)s] [%(levelname)s] %(message)s", "%Y-%m-%d %H:%M:%S")
-    ch.setFormatter(ch_fmt)
+    ch.setFormatter(fmt)
 
-    # File handler
+    # File
     fh = logging.FileHandler(Path(log_dir) / f"{name}.log", encoding="utf-8")
     fh.setLevel(logging.INFO)
-    fh.setFormatter(ch_fmt)
+    fh.setFormatter(fmt)
 
     logger.addHandler(ch)
     logger.addHandler(fh)

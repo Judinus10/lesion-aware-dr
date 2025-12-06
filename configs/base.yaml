@@ -2,73 +2,45 @@ project_name: "lesion_aware_dr"
 run_name: "baseline_efficientnet"
 
 paths:
+  # For local: use "data"
+  # For Colab: you can override these paths in a notebook cell or edit them.
   data_dir: "data"
   raw_dir: "data/raw"
   processed_dir: "data/processed"
   outputs_dir: "outputs"
   checkpoints_dir: "outputs/checkpoints"
 
-# training:
-#   seed: 42
-#   epochs: 30
-#   batch_size: 16
-#   num_workers: 4
-#   lr: 1e-4          # or 0.0001
-#   weight_decay: 1e-5  # or 0.00001
-#   optimizer: "adamw"
-#   scheduler: "cosine"
-
-# model:
-#   backbone: "efficientnet_b3"
-#   num_classes: 5
-#   pretrained: true
-
-# logging:
-#   use_wandb: false
-#   wandb_project: "lesion_aware_dr"
-#   wandb_entity: null   # your username or team, or null
-
-# data:
-#   dataset: "aptos"
-#   train_csv: "data/raw/aptos_train.csv"
-#   val_csv: "data/raw/aptos_val.csv"
-#   image_size: 512
-#   augment: true
-
 model:
-  backbone: efficientnet_b0   # smaller model
+  backbone: "efficientnet_b0"   # good starting backbone
   num_classes: 5
   pretrained: true
 
 data:
-  image_size: 224             # smaller images (faster)
+  # If true → use random fake data (for testing only)
+  use_dummy: true           # set to false when you connect real datasets
+  image_size: 224
+
+  # Real dataset paths (used when use_dummy = false)
+  train_csv: "data/raw/aptos_train.csv"
+  val_csv: "data/raw/aptos_val.csv"
+  image_dir: "data/raw/aptos/images"
+  image_col: "image"        # column in CSV with filename
+  label_col: "label"        # column in CSV with label (0–4)
 
 training:
   seed: 42
-  epochs: 2                   # just test 2 epochs
-  batch_size: 4               # smaller batch
-  num_workers: 0              # important on Windows: avoid multiprocessing
+  epochs: 2          # increase later
+  batch_size: 4
+  num_workers: 0     # 0 for Windows; on Colab you can set 2–4
   lr: 1e-4
   weight_decay: 1e-5
-  optimizer: adamw
-  scheduler: cosine
+  optimizer: "adamw"
+  scheduler: "cosine"
 
 logging:
-  use_wandb: false            # turn off WandB for now
+  use_wandb: false
+  wandb_project: "lesion_aware_dr"
+  wandb_entity: null
 
 loss:
-  name: "ce"          # ce | focal | cb_focal
-
-data:
-  train_csv: "data/raw/train.csv"
-  val_csv: "data/raw/val.csv"
-  image_dir: "data/raw/images"
-  image_col: "image"      # column name in CSV that holds image filename
-  label_col: "label"      # column name in CSV that holds label (0..4)
-  image_size: 512
-
-loss:
-  name: "ce"              # ce | focal | cb_focal
-
-data:
-  image_size: 512
+  name: "ce"         # "ce" | "focal" | "cb_focal" (later)

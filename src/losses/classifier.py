@@ -1,24 +1,21 @@
-# src/losses/classifier.py
 from typing import Callable
 import torch
 from torch import nn
 
 try:
-    from .cb_focal_loss import CBFocalLoss  # you will implement this later
+    from .cb_focal_loss import CBFocalLoss  # you can implement later
     _HAS_CB = True
-except ImportError:
+except Exception:
     _HAS_CB = False
 
 
 def get_loss(cfg) -> Callable:
     """
-    Return a loss function based on cfg.loss.name (default: ce).
-    Supports: ce, focal, cb_focal.
+    Return a loss function based on cfg.loss.name (default: 'ce').
+    Supports: 'ce', 'focal', 'cb_focal' (when implemented).
     """
-    loss_name = "ce"
     loss_cfg = getattr(cfg, "loss", None)
-    if loss_cfg is not None:
-        loss_name = getattr(loss_cfg, "name", "ce")
+    loss_name = getattr(loss_cfg, "name", "ce") if loss_cfg is not None else "ce"
     loss_name = loss_name.lower()
 
     if loss_name == "ce":
@@ -29,7 +26,7 @@ def get_loss(cfg) -> Callable:
         alpha = getattr(loss_cfg, "alpha", None) if loss_cfg is not None else None
 
         class FocalLoss(nn.Module):
-            def __init__(self, gamma, alpha=None):
+            def __init__(self, gamma: float, alpha=None):
                 super().__init__()
                 self.gamma = gamma
                 self.alpha = alpha
@@ -48,7 +45,7 @@ def get_loss(cfg) -> Callable:
     elif loss_name == "cb_focal":
         if not _HAS_CB:
             raise ImportError(
-                "CBFocalLoss requested but cb_focal_loss.py not implemented / import failed."
+                "CBFocalLoss requested but cb_focal_loss.py is not implemented/importable."
             )
         return CBFocalLoss(cfg)
 

@@ -17,25 +17,27 @@ model:
 
 data:
   # If true → use random fake data (for testing only)
-  use_dummy: true           # set to false when you connect real datasets
+  use_dummy: false           # set to false when you connect real datasets
   image_size: 224
 
   # Real dataset paths (used when use_dummy = false)
-  train_csv: "data/raw/aptos_train.csv"
-  val_csv: "data/raw/aptos_val.csv"
-  image_dir: "data/raw/aptos/images"
-  image_col: "image"        # column in CSV with filename
+  train_csv: "E:/DR_related/eyepacs/train.csv"
+  val_csv: "E:/DR_related/eyepacs/val.csv"
+  image_dir: "E:/DR_related/eyepacs/Images"
+  image_col: "image_id"        # column in CSV with filename
   label_col: "label"        # column in CSV with label (0–4)
 
 training:
   seed: 42
-  epochs: 2          # increase later
-  batch_size: 4
-  num_workers: 0     # 0 for Windows; on Colab you can set 2–4
+  # epochs: 10
+  epochs: 1
+  batch_size: 8
+  num_workers: 0
   lr: 1e-4
   weight_decay: 1e-5
   optimizer: "adamw"
   scheduler: "cosine"
+
 
 logging:
   use_wandb: false

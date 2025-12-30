@@ -1,6 +1,10 @@
 import argparse
 from pathlib import Path
 
+from tqdm import tqdm
+import time
+
+
 import yaml
 from omegaconf import OmegaConf
 
@@ -116,17 +120,24 @@ def main():
         model.train()
         running_loss = 0.0
 
-        for batch in train_loader:
+        pbar = tqdm(train_loader, total=len(train_loader), desc=f"Epoch {epoch}/{cfg.training.epochs} [TRAIN]")
+
+        start_t = time.time()
+        for batch in pbar:
             images = batch["image"].to(device)
             labels = batch["label"].to(device)
 
-            optimizer.zero_grad()
+            optimizer.zero_grad(set_to_none=True)
             logits = model(images)
             loss = criterion(logits, labels)
             loss.backward()
             optimizer.step()
 
             running_loss += loss.item() * images.size(0)
+
+            # update progress bar
+            pbar.set_postfix(loss=f"{loss.item():.4f}", elapsed=f"{(time.time()-start_t)/60:.1f}m")
+
 
         epoch_train_loss = running_loss / len(train_loader.dataset)
 

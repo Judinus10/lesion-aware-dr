@@ -22,6 +22,8 @@ try:
 except Exception:
     _HAS_TORCHMETRICS = False
 
+from torch.cuda.amp import autocast, GradScaler
+
 
 # -------------------------
 # Config utils
@@ -50,6 +52,7 @@ def main():
     args = parse_args()
     cfg = load_config(args.cfg_path)
 
+    # Cast numeric config values safely
     cfg.training.lr = float(cfg.training.lr)
     cfg.training.weight_decay = float(cfg.training.weight_decay)
 
@@ -65,8 +68,21 @@ def main():
     logger.info("Starting training script")
     logger.info(f"Config:\n{OmegaConf.to_yaml(cfg)}")
 
+    # device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logger.info(f"Using device: {device}")
+
+    if device.type == "cuda":
+        logger.info(f"GPU: {torch.cuda.get_device_name(0)}")
+        logger.info(
+            f"VRAM: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.2f} GB"
+        )
+    else:
+        logger.warning("CUDA not available — running on CPU")
+
+    # speed
+    if device.type == "cuda":
+        torch.backends.cudnn.benchmark = True
 
     # -------------------------
     # Data
@@ -103,6 +119,11 @@ def main():
         else None
     )
 
+    # AMP scaler (THIS is what makes mixed precision actually happen)
+    scaler = GradScaler(enabled=(device.type == "cuda"))
+    logger.info(f"AMP enabled: {scaler.is_enabled()}")
+
+    # metrics
     if _HAS_TORCHMETRICS:
         acc_metric = MulticlassAccuracy(num_classes=cfg.model.num_classes).to(device)
         f1_metric = MulticlassF1Score(
@@ -111,6 +132,9 @@ def main():
     else:
         acc_metric = f1_metric = None
         logger.warning("torchmetrics not installed — metrics disabled")
+
+    # optional: grad clipping config (safe defaults)
+    grad_clip_norm = float(getattr(cfg.training, "grad_clip_norm", 0.0) or 0.0)
 
     # -------------------------
     # Training loop
@@ -131,14 +155,27 @@ def main():
         )
 
         for batch in train_pbar:
-            images = batch["image"].to(device)
-            labels = batch["label"].to(device)
+            # non_blocking helps if your DataLoader uses pin_memory=True
+            images = batch["image"].to(device, non_blocking=True)
+            labels = batch["label"].to(device, non_blocking=True)
 
             optimizer.zero_grad(set_to_none=True)
-            logits = model(images)
-            loss = criterion(logits, labels)
-            loss.backward()
-            optimizer.step()
+
+            # AMP forward
+            with autocast(enabled=(device.type == "cuda")):
+                logits = model(images)
+                loss = criterion(logits, labels)
+
+            # AMP backward + step
+            scaler.scale(loss).backward()
+
+            # Optional: clip grads safely with AMP (must unscale first)
+            if grad_clip_norm > 0:
+                scaler.unscale_(optimizer)
+                torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip_norm)
+
+            scaler.step(optimizer)
+            scaler.update()
 
             running_loss += loss.item() * images.size(0)
 
@@ -166,11 +203,14 @@ def main():
 
         with torch.no_grad():
             for batch in val_pbar:
-                images = batch["image"].to(device)
-                labels = batch["label"].to(device)
+                images = batch["image"].to(device, non_blocking=True)
+                labels = batch["label"].to(device, non_blocking=True)
 
-                logits = model(images)
-                loss = criterion(logits, labels)
+                # AMP in val prevents unnecessary VRAM spikes too
+                with autocast(enabled=(device.type == "cuda")):
+                    logits = model(images)
+                    loss = criterion(logits, labels)
+
                 val_loss += loss.item() * images.size(0)
 
                 if acc_metric is not None:

@@ -21,9 +21,9 @@ data:
   image_size: 224
 
   # Real dataset paths (used when use_dummy = false)
-  train_csv: "E:/DR_related/eyepacs/train.csv"
-  val_csv: "E:/DR_related/eyepacs/val.csv"
-  image_dir: "E:/DR_related/eyepacs/Images"
+  train_csv: "/content/drive/MyDrive/Lesion_aware_DR/eyepacs/train.csv"
+  val_csv:   "/content/drive/MyDrive/Lesion_aware_DR/eyepacs/val.csv"
+  image_dir: "/content/eyepacs_images/Images"
   image_col: "image_id"        # column in CSV with filename
   label_col: "label"        # column in CSV with label (0–4)
 
@@ -31,8 +31,8 @@ training:
   seed: 42
   # epochs: 10
   epochs: 1
-  batch_size: 8
-  num_workers: 0
+  batch_size: 4
+  num_workers: 2
   lr: 1e-4
   weight_decay: 1e-5
   optimizer: "adamw"

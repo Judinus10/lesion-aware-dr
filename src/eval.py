@@ -68,20 +68,20 @@ def load_cfg(cfg_path: str) -> dict:
 def load_checkpoint(model: torch.nn.Module, ckpt_path: str, device: torch.device):
     ckpt = torch.load(ckpt_path, map_location=device)
 
-    # Handle common checkpoint formats
-    if isinstance(ckpt, dict) and "model_state_dict" in ckpt:
+    # ✅ Your training saved weights under "model_state"
+    if isinstance(ckpt, dict) and "model_state" in ckpt:
+        state = ckpt["model_state"]
+    elif isinstance(ckpt, dict) and "model_state_dict" in ckpt:
         state = ckpt["model_state_dict"]
     elif isinstance(ckpt, dict) and "state_dict" in ckpt:
         state = ckpt["state_dict"]
     else:
-        # Assume it's a plain state_dict
-        state = ckpt
+        state = ckpt  # assume plain state_dict
 
-    # Strip "module." if saved from DataParallel
+    # Strip "module." if needed
     new_state = {}
     for k, v in state.items():
-        nk = k.replace("module.", "")
-        new_state[nk] = v
+        new_state[k.replace("module.", "")] = v
 
     model.load_state_dict(new_state, strict=True)
 

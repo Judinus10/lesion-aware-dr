@@ -4,7 +4,11 @@ from pathlib import Path
 import yaml
 from omegaconf import OmegaConf
 
+import numpy as np
+import pandas as pd
+
 import torch
+import torch.nn as nn
 from torch import optim
 from torch.optim.lr_scheduler import CosineAnnealingLR
 
@@ -14,7 +18,6 @@ from src.utils.logger import get_logger
 from src.utils.seed import set_seed
 from src.models import build_model
 from src.data.dr_datamodule import DRDataModule
-from src.losses.classifier import get_loss
 
 try:
     from torchmetrics.classification import MulticlassAccuracy, MulticlassF1Score
@@ -43,6 +46,79 @@ def parse_args():
         help="Path to YAML config file",
     )
     return parser.parse_args()
+
+
+# -------------------------
+# Loss helpers
+# -------------------------
+def compute_class_weights(train_csv: str, label_col: str, num_classes: int) -> torch.Tensor:
+    """
+    Returns normalized inverse-frequency weights of shape [num_classes].
+    """
+    df = pd.read_csv(train_csv)
+    counts = df[label_col].value_counts().sort_index()
+    counts = counts.reindex(range(num_classes), fill_value=0).values.astype(np.float32)
+
+    # avoid divide-by-zero
+    counts = np.maximum(counts, 1.0)
+
+    weights = 1.0 / counts
+    weights = weights / weights.mean()  # normalize around 1.0
+    return torch.tensor(weights, dtype=torch.float32)
+
+
+class FocalLoss(nn.Module):
+    """
+    Focal loss for multiclass classification.
+    alpha: tensor [C] or None
+    gamma: float
+    """
+    def __init__(self, alpha=None, gamma: float = 2.0):
+        super().__init__()
+        self.alpha = alpha
+        self.gamma = gamma
+
+    def forward(self, logits, targets):
+        ce = nn.functional.cross_entropy(
+            logits, targets, reduction="none", weight=self.alpha
+        )
+        pt = torch.exp(-ce)
+        loss = ((1.0 - pt) ** self.gamma) * ce
+        return loss.mean()
+
+
+def build_criterion(cfg: OmegaConf, device: torch.device, logger=None) -> nn.Module:
+    """
+    Supports:
+      loss.name: "ce" or "focal"
+      loss.use_class_weights: true/false
+      loss.gamma: (for focal, default 2.0)
+    """
+    loss_cfg = cfg.get("loss", {}) or {}
+    loss_name = str(loss_cfg.get("name", "ce")).lower()
+    use_w = bool(loss_cfg.get("use_class_weights", False))
+
+    alpha = None
+    if use_w:
+        # Required config keys
+        train_csv = cfg.data.train_csv
+        label_col = cfg.data.label_col
+        num_classes = int(cfg.model.num_classes)
+
+        alpha = compute_class_weights(train_csv, label_col, num_classes).to(device)
+        if logger is not None:
+            logger.info(f"[LOSS] Using class weights: {alpha.detach().cpu().numpy()}")
+
+    if loss_name == "focal":
+        gamma = float(loss_cfg.get("gamma", 2.0))
+        if logger is not None:
+            logger.info(f"[LOSS] FocalLoss gamma={gamma}, class_weights={use_w}")
+        return FocalLoss(alpha=alpha, gamma=gamma)
+
+    # default: weighted CE or normal CE
+    if logger is not None:
+        logger.info(f"[LOSS] CrossEntropyLoss, class_weights={use_w}")
+    return nn.CrossEntropyLoss(weight=alpha)
 
 
 # -------------------------
@@ -105,7 +181,8 @@ def main():
         pretrained=cfg.model.pretrained,
     ).to(device)
 
-    criterion = get_loss(cfg)
+    # ✅ LOSS: weighted CE / focal controlled by YAML
+    criterion = build_criterion(cfg, device, logger=logger)
 
     optimizer = optim.AdamW(
         model.parameters(),
@@ -119,7 +196,7 @@ def main():
         else None
     )
 
-    # AMP scaler (THIS is what makes mixed precision actually happen)
+    # AMP scaler
     scaler = GradScaler(enabled=(device.type == "cuda"))
     logger.info(f"AMP enabled: {scaler.is_enabled()}")
 
@@ -133,7 +210,6 @@ def main():
         acc_metric = f1_metric = None
         logger.warning("torchmetrics not installed — metrics disabled")
 
-    # optional: grad clipping config (safe defaults)
     grad_clip_norm = float(getattr(cfg.training, "grad_clip_norm", 0.0) or 0.0)
 
     # -------------------------
@@ -155,21 +231,17 @@ def main():
         )
 
         for batch in train_pbar:
-            # non_blocking helps if your DataLoader uses pin_memory=True
             images = batch["image"].to(device, non_blocking=True)
             labels = batch["label"].to(device, non_blocking=True)
 
             optimizer.zero_grad(set_to_none=True)
 
-            # AMP forward
             with autocast(enabled=(device.type == "cuda")):
                 logits = model(images)
                 loss = criterion(logits, labels)
 
-            # AMP backward + step
             scaler.scale(loss).backward()
 
-            # Optional: clip grads safely with AMP (must unscale first)
             if grad_clip_norm > 0:
                 scaler.unscale_(optimizer)
                 torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip_norm)
@@ -206,7 +278,6 @@ def main():
                 images = batch["image"].to(device, non_blocking=True)
                 labels = batch["label"].to(device, non_blocking=True)
 
-                # AMP in val prevents unnecessary VRAM spikes too
                 with autocast(enabled=(device.type == "cuda")):
                     logits = model(images)
                     loss = criterion(logits, labels)

@@ -30,8 +30,8 @@ data:
 training:
   seed: 42
   # epochs: 10
-  epochs: 1
-  batch_size: 4
+  epochs: 10
+  batch_size: 8
   num_workers: 2
   lr: 1e-4
   weight_decay: 1e-5
@@ -46,3 +46,4 @@ logging:
 
 loss:
   name: "ce"         # "ce" | "focal" | "cb_focal" (later)
+  use_class_weights: true

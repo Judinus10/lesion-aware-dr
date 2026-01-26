@@ -25,7 +25,13 @@ try:
 except Exception:
     _HAS_TORCHMETRICS = False
 
-from torch.cuda.amp import autocast, GradScaler
+# Prefer new AMP API if available (removes deprecation warnings)
+try:
+    from torch.amp import autocast, GradScaler  # torch>=2.0
+    _NEW_AMP = True
+except Exception:
+    from torch.cuda.amp import autocast, GradScaler  # fallback
+    _NEW_AMP = False
 
 
 # -------------------------
@@ -100,7 +106,6 @@ def build_criterion(cfg: OmegaConf, device: torch.device, logger=None) -> nn.Mod
 
     alpha = None
     if use_w:
-        # Required config keys
         train_csv = cfg.data.train_csv
         label_col = cfg.data.label_col
         num_classes = int(cfg.model.num_classes)
@@ -115,7 +120,6 @@ def build_criterion(cfg: OmegaConf, device: torch.device, logger=None) -> nn.Mod
             logger.info(f"[LOSS] FocalLoss gamma={gamma}, class_weights={use_w}")
         return FocalLoss(alpha=alpha, gamma=gamma)
 
-    # default: weighted CE or normal CE
     if logger is not None:
         logger.info(f"[LOSS] CrossEntropyLoss, class_weights={use_w}")
     return nn.CrossEntropyLoss(weight=alpha)
@@ -196,15 +200,26 @@ def main():
         else None
     )
 
-    # AMP scaler
-    scaler = GradScaler(enabled=(device.type == "cuda"))
+    # AMP scaler (new API if available)
+    if _NEW_AMP:
+        scaler = GradScaler("cuda", enabled=(device.type == "cuda"))
+    else:
+        scaler = GradScaler(enabled=(device.type == "cuda"))
     logger.info(f"AMP enabled: {scaler.is_enabled()}")
 
-    # metrics
+    # -------------------------
+    # Metrics (FIXED)
+    # -------------------------
     if _HAS_TORCHMETRICS:
-        acc_metric = MulticlassAccuracy(num_classes=cfg.model.num_classes).to(device)
+        # ✅ Macro accuracy (not micro) — meaningful for imbalance
+        acc_metric = MulticlassAccuracy(
+            num_classes=cfg.model.num_classes,
+            average="macro"
+        ).to(device)
+
         f1_metric = MulticlassF1Score(
-            num_classes=cfg.model.num_classes, average="macro"
+            num_classes=cfg.model.num_classes,
+            average="macro"
         ).to(device)
     else:
         acc_metric = f1_metric = None
@@ -236,9 +251,15 @@ def main():
 
             optimizer.zero_grad(set_to_none=True)
 
-            with autocast(enabled=(device.type == "cuda")):
-                logits = model(images)
-                loss = criterion(logits, labels)
+            # ✅ AMP on for training
+            if _NEW_AMP:
+                with autocast("cuda", enabled=(device.type == "cuda")):
+                    logits = model(images)
+                    loss = criterion(logits, labels)
+            else:
+                with autocast(enabled=(device.type == "cuda")):
+                    logits = model(images)
+                    loss = criterion(logits, labels)
 
             scaler.scale(loss).backward()
 
@@ -278,9 +299,16 @@ def main():
                 images = batch["image"].to(device, non_blocking=True)
                 labels = batch["label"].to(device, non_blocking=True)
 
-                with autocast(enabled=(device.type == "cuda")):
-                    logits = model(images)
-                    loss = criterion(logits, labels)
+                # ✅ IMPORTANT: disable AMP for validation for stable logits/argmax
+                # (validation speed is not the bottleneck)
+                if _NEW_AMP:
+                    with autocast("cuda", enabled=False):
+                        logits = model(images)
+                        loss = criterion(logits, labels)
+                else:
+                    with autocast(enabled=False):
+                        logits = model(images)
+                        loss = criterion(logits, labels)
 
                 val_loss += loss.item() * images.size(0)
 

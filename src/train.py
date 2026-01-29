@@ -126,6 +126,32 @@ def build_criterion(cfg: OmegaConf, device: torch.device, logger=None) -> nn.Mod
 
 
 # -------------------------
+# Checkpoint helper
+# -------------------------
+def save_checkpoint(
+    ckpt_path: Path,
+    epoch: int,
+    model: torch.nn.Module,
+    optimizer: torch.optim.Optimizer,
+    scheduler,
+    scaler,
+    extra: dict,
+    logger=None,
+):
+    ckpt = {
+        "epoch": epoch,
+        "model_state": model.state_dict(),
+        "optimizer_state": optimizer.state_dict(),
+        "scheduler_state": scheduler.state_dict() if scheduler is not None else None,
+        "scaler_state": scaler.state_dict() if scaler is not None else None,
+    }
+    ckpt.update(extra or {})
+    torch.save(ckpt, ckpt_path)
+    if logger is not None:
+        logger.info(f"Saved checkpoint → {ckpt_path}")
+
+
+# -------------------------
 # Main
 # -------------------------
 def main():
@@ -185,7 +211,6 @@ def main():
         pretrained=cfg.model.pretrained,
     ).to(device)
 
-    # ✅ LOSS: weighted CE / focal controlled by YAML
     criterion = build_criterion(cfg, device, logger=logger)
 
     optimizer = optim.AdamW(
@@ -200,7 +225,7 @@ def main():
         else None
     )
 
-    # AMP scaler (new API if available)
+    # AMP scaler
     if _NEW_AMP:
         scaler = GradScaler("cuda", enabled=(device.type == "cuda"))
     else:
@@ -208,10 +233,9 @@ def main():
     logger.info(f"AMP enabled: {scaler.is_enabled()}")
 
     # -------------------------
-    # Metrics (FIXED)
+    # Metrics
     # -------------------------
     if _HAS_TORCHMETRICS:
-        # ✅ Macro accuracy (not micro) — meaningful for imbalance
         acc_metric = MulticlassAccuracy(
             num_classes=cfg.model.num_classes,
             average="macro"
@@ -231,6 +255,17 @@ def main():
     # Training loop
     # -------------------------
     best_val_loss = float("inf")
+    best_val_f1 = -1.0
+    best_val_acc = -1.0  # ✅ ADD THIS
+
+    # optional run_name prefix
+    run_name = str(getattr(cfg, "run_name", "") or "").strip()
+    prefix = f"{run_name}_" if run_name else ""
+
+    ckpt_dir = Path(cfg.paths.checkpoints_dir)
+    best_loss_path = ckpt_dir / f"{prefix}best_loss_model.pt"
+    best_f1_path = ckpt_dir / f"{prefix}best_f1_model.pt"
+    best_acc_path = ckpt_dir / f"{prefix}best_acc_model.pt"  # ✅ ADD THIS
 
     for epoch in range(1, cfg.training.epochs + 1):
 
@@ -251,7 +286,6 @@ def main():
 
             optimizer.zero_grad(set_to_none=True)
 
-            # ✅ AMP on for training
             if _NEW_AMP:
                 with autocast("cuda", enabled=(device.type == "cuda")):
                     logits = model(images)
@@ -299,8 +333,6 @@ def main():
                 images = batch["image"].to(device, non_blocking=True)
                 labels = batch["label"].to(device, non_blocking=True)
 
-                # ✅ IMPORTANT: disable AMP for validation for stable logits/argmax
-                # (validation speed is not the bottleneck)
                 if _NEW_AMP:
                     with autocast("cuda", enabled=False):
                         logits = model(images)
@@ -338,18 +370,77 @@ def main():
             f"val_f1={val_f1:.4f}"
         )
 
-        # save best
+        # -------------------------
+        # ✅ Save best by LOSS
+        # -------------------------
         if epoch_val_loss < best_val_loss:
             best_val_loss = epoch_val_loss
-            ckpt_path = Path(cfg.paths.checkpoints_dir) / "best_model.pt"
-            torch.save(
-                {
-                    "epoch": epoch,
-                    "model_state": model.state_dict(),
+            save_checkpoint(
+                ckpt_path=best_loss_path,
+                epoch=epoch,
+                model=model,
+                optimizer=optimizer,
+                scheduler=scheduler,
+                scaler=scaler,
+                extra={
+                    "best_metric": "val_loss",
+                    "val_loss": float(epoch_val_loss),
+                    "val_f1": float(val_f1),
+                    "val_acc": float(val_acc),
                 },
-                ckpt_path,
+                logger=logger,
             )
-            logger.info(f"Saved best model → {ckpt_path}")
+            logger.info(
+                f"Saved BEST-LOSS model (epoch={epoch}, val_loss={epoch_val_loss:.4f}) → {best_loss_path}"
+            )
+
+        # -------------------------
+        # ✅ Save best by MACRO F1
+        # -------------------------
+        if val_f1 > best_val_f1:
+            best_val_f1 = val_f1
+            save_checkpoint(
+                ckpt_path=best_f1_path,
+                epoch=epoch,
+                model=model,
+                optimizer=optimizer,
+                scheduler=scheduler,
+                scaler=scaler,
+                extra={
+                    "best_metric": "val_f1",
+                    "val_f1": float(val_f1),
+                    "val_loss": float(epoch_val_loss),
+                    "val_acc": float(val_acc),
+                },
+                logger=logger,
+            )
+            logger.info(
+                f"Saved BEST-F1 model (epoch={epoch}, val_f1={val_f1:.4f}) → {best_f1_path}"
+            )
+
+        # -------------------------
+        # ✅ Save best by ACC (ADDED)
+        # -------------------------
+        if val_acc > best_val_acc:
+            best_val_acc = val_acc
+            save_checkpoint(
+                ckpt_path=best_acc_path,
+                epoch=epoch,
+                model=model,
+                optimizer=optimizer,
+                scheduler=scheduler,
+                scaler=scaler,
+                extra={
+                    "best_metric": "val_acc",
+                    "val_acc": float(val_acc),
+                    "val_f1": float(val_f1),
+                    "val_loss": float(epoch_val_loss),
+                },
+                logger=logger,
+            )
+            logger.info(
+                f"Saved BEST-ACC model (epoch={epoch}, val_acc={val_acc:.4f}) → {best_acc_path}"
+            )
 
     logger.info("Training completed")
 

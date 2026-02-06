@@ -25,14 +25,6 @@ try:
 except Exception:
     _HAS_TORCHMETRICS = False
 
-# Prefer new AMP API if available (removes deprecation warnings)
-try:
-    from torch.amp import autocast, GradScaler  # torch>=2.0
-    _NEW_AMP = True
-except Exception:
-    from torch.cuda.amp import autocast, GradScaler  # fallback
-    _NEW_AMP = False
-
 
 # -------------------------
 # Config utils
@@ -55,100 +47,80 @@ def parse_args():
 
 
 # -------------------------
-# Loss helpers
+# Class weights utils
 # -------------------------
-def compute_class_weights(train_csv: str, label_col: str, num_classes: int) -> torch.Tensor:
-    """
-    Returns normalized inverse-frequency weights of shape [num_classes].
-    """
-    df = pd.read_csv(train_csv)
-    counts = df[label_col].value_counts().sort_index()
-    counts = counts.reindex(range(num_classes), fill_value=0).values.astype(np.float32)
+def compute_class_weights_from_csv(
+    csv_path: str,
+    label_col: str,
+    num_classes: int,
+    mode: str = "inverse",  # "inverse" or "effective"
+    beta: float = 0.9999,
+) -> np.ndarray:
+    df = pd.read_csv(csv_path)
+    labels = df[label_col].astype(int).values
 
-    # avoid divide-by-zero
+    counts = np.bincount(labels, minlength=num_classes).astype(np.float32)
     counts = np.maximum(counts, 1.0)
 
-    weights = 1.0 / counts
-    weights = weights / weights.mean()  # normalize around 1.0
-    return torch.tensor(weights, dtype=torch.float32)
+    if mode == "effective":
+        effective_num = 1.0 - np.power(beta, counts)
+        weights = (1.0 - beta) / np.maximum(effective_num, 1e-8)
+    else:
+        weights = 1.0 / counts
+
+    weights = weights / weights.mean()
+    return weights
 
 
 class FocalLoss(nn.Module):
-    """
-    Focal loss for multiclass classification.
-    alpha: tensor [C] or None
-    gamma: float
-    """
-    def __init__(self, alpha=None, gamma: float = 2.0):
+    def __init__(self, gamma: float = 2.0, alpha: torch.Tensor | None = None):
         super().__init__()
+        self.gamma = float(gamma)
         self.alpha = alpha
-        self.gamma = gamma
 
-    def forward(self, logits, targets):
-        ce = nn.functional.cross_entropy(
-            logits, targets, reduction="none", weight=self.alpha
-        )
+    def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
+        ce = nn.functional.cross_entropy(logits, targets, reduction="none")
         pt = torch.exp(-ce)
         loss = ((1.0 - pt) ** self.gamma) * ce
+        if self.alpha is not None:
+            at = self.alpha[targets]
+            loss = at * loss
         return loss.mean()
 
 
-def build_criterion(cfg: OmegaConf, device: torch.device, logger=None) -> nn.Module:
-    """
-    Supports:
-      loss.name: "ce" or "focal"
-      loss.use_class_weights: true/false
-      loss.gamma: (for focal, default 2.0)
-    """
-    loss_cfg = cfg.get("loss", {}) or {}
-    loss_name = str(loss_cfg.get("name", "ce")).lower()
-    use_w = bool(loss_cfg.get("use_class_weights", False))
+def build_criterion(cfg: OmegaConf, device: torch.device, logger):
+    loss_cfg = getattr(cfg, "loss", None)
+    loss_name = getattr(loss_cfg, "name", "ce") if loss_cfg is not None else "ce"
+    loss_name = str(loss_name).lower()
 
-    alpha = None
-    if use_w:
-        train_csv = cfg.data.train_csv
-        label_col = cfg.data.label_col
-        num_classes = int(cfg.model.num_classes)
+    use_class_weights = bool(getattr(loss_cfg, "use_class_weights", False)) if loss_cfg is not None else False
+    weight_mode = str(getattr(loss_cfg, "weight_mode", "inverse")).lower() if loss_cfg is not None else "inverse"
+    beta = float(getattr(loss_cfg, "beta", 0.9999)) if loss_cfg is not None else 0.9999
 
-        alpha = compute_class_weights(train_csv, label_col, num_classes).to(device)
-        if logger is not None:
-            logger.info(f"[LOSS] Using class weights: {alpha.detach().cpu().numpy()}")
+    class_weights_t = None
+    if use_class_weights:
+        w_np = compute_class_weights_from_csv(
+            csv_path=cfg.data.train_csv,
+            label_col=cfg.data.label_col,
+            num_classes=int(cfg.model.num_classes),
+            mode=weight_mode,
+            beta=beta,
+        )
+        class_weights_t = torch.tensor(w_np, dtype=torch.float32, device=device)
+        logger.info(f"[LOSS] Using class weights (mode={weight_mode}): {w_np.round(4).tolist()}")
+    else:
+        logger.info("[LOSS] Class weights: OFF")
+
+    if loss_name == "ce":
+        logger.info("[LOSS] Using CrossEntropyLoss")
+        return nn.CrossEntropyLoss(weight=class_weights_t)
 
     if loss_name == "focal":
-        gamma = float(loss_cfg.get("gamma", 2.0))
-        if logger is not None:
-            logger.info(f"[LOSS] FocalLoss gamma={gamma}, class_weights={use_w}")
-        return FocalLoss(alpha=alpha, gamma=gamma)
+        gamma = float(getattr(loss_cfg, "gamma", 2.0)) if loss_cfg is not None else 2.0
+        logger.info(f"[LOSS] Using FocalLoss(gamma={gamma}) alpha={'ON' if class_weights_t is not None else 'OFF'}")
+        return FocalLoss(gamma=gamma, alpha=class_weights_t)
 
-    if logger is not None:
-        logger.info(f"[LOSS] CrossEntropyLoss, class_weights={use_w}")
-    return nn.CrossEntropyLoss(weight=alpha)
-
-
-# -------------------------
-# Checkpoint helper
-# -------------------------
-def save_checkpoint(
-    ckpt_path: Path,
-    epoch: int,
-    model: torch.nn.Module,
-    optimizer: torch.optim.Optimizer,
-    scheduler,
-    scaler,
-    extra: dict,
-    logger=None,
-):
-    ckpt = {
-        "epoch": epoch,
-        "model_state": model.state_dict(),
-        "optimizer_state": optimizer.state_dict(),
-        "scheduler_state": scheduler.state_dict() if scheduler is not None else None,
-        "scaler_state": scaler.state_dict() if scaler is not None else None,
-    }
-    ckpt.update(extra or {})
-    torch.save(ckpt, ckpt_path)
-    if logger is not None:
-        logger.info(f"Saved checkpoint → {ckpt_path}")
+    raise ValueError(f"Unknown loss type: {loss_name}")
 
 
 # -------------------------
@@ -158,41 +130,22 @@ def main():
     args = parse_args()
     cfg = load_config(args.cfg_path)
 
-    # Cast numeric config values safely
     cfg.training.lr = float(cfg.training.lr)
     cfg.training.weight_decay = float(cfg.training.weight_decay)
 
-    # dirs
     Path(cfg.paths.outputs_dir).mkdir(parents=True, exist_ok=True)
     Path(cfg.paths.checkpoints_dir).mkdir(parents=True, exist_ok=True)
 
-    # seed
     set_seed(cfg.training.seed)
 
-    # logger
     logger = get_logger("train")
     logger.info("Starting training script")
     logger.info(f"Config:\n{OmegaConf.to_yaml(cfg)}")
 
-    # device
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     logger.info(f"Using device: {device}")
 
-    if device.type == "cuda":
-        logger.info(f"GPU: {torch.cuda.get_device_name(0)}")
-        logger.info(
-            f"VRAM: {torch.cuda.get_device_properties(0).total_memory / 1024**3:.2f} GB"
-        )
-    else:
-        logger.warning("CUDA not available — running on CPU")
-
-    # speed
-    if device.type == "cuda":
-        torch.backends.cudnn.benchmark = True
-
-    # -------------------------
     # Data
-    # -------------------------
     datamodule = DRDataModule(cfg)
     train_loader = datamodule.train_dataloader()
     val_loader = datamodule.val_dataloader()
@@ -202,16 +155,14 @@ def main():
     logger.info(f"Train batches: {len(train_loader)}")
     logger.info(f"Val batches:   {len(val_loader)}")
 
-    # -------------------------
-    # Model / loss / optim
-    # -------------------------
+    # Model
     model = build_model(
         backbone=cfg.model.backbone,
         num_classes=cfg.model.num_classes,
         pretrained=cfg.model.pretrained,
     ).to(device)
 
-    criterion = build_criterion(cfg, device, logger=logger)
+    criterion = build_criterion(cfg, device, logger)
 
     optimizer = optim.AdamW(
         model.parameters(),
@@ -225,50 +176,18 @@ def main():
         else None
     )
 
-    # AMP scaler
-    if _NEW_AMP:
-        scaler = GradScaler("cuda", enabled=(device.type == "cuda"))
-    else:
-        scaler = GradScaler(enabled=(device.type == "cuda"))
-    logger.info(f"AMP enabled: {scaler.is_enabled()}")
-
-    # -------------------------
-    # Metrics
-    # -------------------------
     if _HAS_TORCHMETRICS:
-        acc_metric = MulticlassAccuracy(
-            num_classes=cfg.model.num_classes,
-            average="macro"
-        ).to(device)
-
-        f1_metric = MulticlassF1Score(
-            num_classes=cfg.model.num_classes,
-            average="macro"
-        ).to(device)
+        acc_metric = MulticlassAccuracy(num_classes=cfg.model.num_classes).to(device)
+        f1_metric = MulticlassF1Score(num_classes=cfg.model.num_classes, average="macro").to(device)
     else:
         acc_metric = f1_metric = None
         logger.warning("torchmetrics not installed — metrics disabled")
 
-    grad_clip_norm = float(getattr(cfg.training, "grad_clip_norm", 0.0) or 0.0)
-
-    # -------------------------
-    # Training loop
-    # -------------------------
-    best_val_loss = float("inf")
     best_val_f1 = -1.0
-    best_val_acc = -1.0  # ✅ ADD THIS
-
-    # optional run_name prefix
-    run_name = str(getattr(cfg, "run_name", "") or "").strip()
-    prefix = f"{run_name}_" if run_name else ""
-
+    best_val_loss = float("inf")
     ckpt_dir = Path(cfg.paths.checkpoints_dir)
-    best_loss_path = ckpt_dir / f"{prefix}best_loss_model.pt"
-    best_f1_path = ckpt_dir / f"{prefix}best_f1_model.pt"
-    best_acc_path = ckpt_dir / f"{prefix}best_acc_model.pt"  # ✅ ADD THIS
 
     for epoch in range(1, cfg.training.epochs + 1):
-
         # -------- TRAIN --------
         model.train()
         running_loss = 0.0
@@ -285,37 +204,19 @@ def main():
             labels = batch["label"].to(device, non_blocking=True)
 
             optimizer.zero_grad(set_to_none=True)
-
-            if _NEW_AMP:
-                with autocast("cuda", enabled=(device.type == "cuda")):
-                    logits = model(images)
-                    loss = criterion(logits, labels)
-            else:
-                with autocast(enabled=(device.type == "cuda")):
-                    logits = model(images)
-                    loss = criterion(logits, labels)
-
-            scaler.scale(loss).backward()
-
-            if grad_clip_norm > 0:
-                scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip_norm)
-
-            scaler.step(optimizer)
-            scaler.update()
+            logits = model(images)
+            loss = criterion(logits, labels)
+            loss.backward()
+            optimizer.step()
 
             running_loss += loss.item() * images.size(0)
-
-            train_pbar.set_postfix(
-                loss=f"{loss.item():.4f}",
-                lr=f"{optimizer.param_groups[0]['lr']:.2e}",
-            )
+            train_pbar.set_postfix(loss=f"{loss.item():.4f}", lr=f"{optimizer.param_groups[0]['lr']:.2e}")
 
         epoch_train_loss = running_loss / len(train_loader.dataset)
 
-        # -------- VALIDATION --------
+        # -------- VALID --------
         model.eval()
-        val_loss = 0.0
+        val_loss_sum = 0.0
 
         if acc_metric is not None:
             acc_metric.reset()
@@ -333,16 +234,9 @@ def main():
                 images = batch["image"].to(device, non_blocking=True)
                 labels = batch["label"].to(device, non_blocking=True)
 
-                if _NEW_AMP:
-                    with autocast("cuda", enabled=False):
-                        logits = model(images)
-                        loss = criterion(logits, labels)
-                else:
-                    with autocast(enabled=False):
-                        logits = model(images)
-                        loss = criterion(logits, labels)
-
-                val_loss += loss.item() * images.size(0)
+                logits = model(images)
+                loss = criterion(logits, labels)
+                val_loss_sum += loss.item() * images.size(0)
 
                 if acc_metric is not None:
                     preds = torch.argmax(logits, dim=1)
@@ -351,13 +245,14 @@ def main():
 
                 val_pbar.set_postfix(val_loss=f"{loss.item():.4f}")
 
-        epoch_val_loss = val_loss / len(val_loader.dataset)
+        epoch_val_loss = val_loss_sum / len(val_loader.dataset)
 
         if acc_metric is not None:
-            val_acc = acc_metric.compute().item()
-            val_f1 = f1_metric.compute().item()
+            val_acc = float(acc_metric.compute().item())
+            val_f1 = float(f1_metric.compute().item())
         else:
-            val_acc = val_f1 = 0.0
+            val_acc = 0.0
+            val_f1 = 0.0
 
         if scheduler is not None:
             scheduler.step()
@@ -367,80 +262,26 @@ def main():
             f"train_loss={epoch_train_loss:.4f} "
             f"val_loss={epoch_val_loss:.4f} "
             f"val_acc={val_acc:.4f} "
-            f"val_f1={val_f1:.4f}"
+            f"val_f1={val_f1:.4f} "
+            f"(best_f1={best_val_f1:.4f}, best_loss={best_val_loss:.4f})"
         )
 
-        # -------------------------
-        # ✅ Save best by LOSS
-        # -------------------------
-        if epoch_val_loss < best_val_loss:
-            best_val_loss = epoch_val_loss
-            save_checkpoint(
-                ckpt_path=best_loss_path,
-                epoch=epoch,
-                model=model,
-                optimizer=optimizer,
-                scheduler=scheduler,
-                scaler=scaler,
-                extra={
-                    "best_metric": "val_loss",
-                    "val_loss": float(epoch_val_loss),
-                    "val_f1": float(val_f1),
-                    "val_acc": float(val_acc),
-                },
-                logger=logger,
-            )
-            logger.info(
-                f"Saved BEST-LOSS model (epoch={epoch}, val_loss={epoch_val_loss:.4f}) → {best_loss_path}"
-            )
+        # Always save last (useful for debugging)
+        torch.save({"epoch": epoch, "model_state": model.state_dict()}, ckpt_dir / "last_model.pt")
 
-        # -------------------------
-        # ✅ Save best by MACRO F1
-        # -------------------------
+        # Save best by macro F1
         if val_f1 > best_val_f1:
             best_val_f1 = val_f1
-            save_checkpoint(
-                ckpt_path=best_f1_path,
-                epoch=epoch,
-                model=model,
-                optimizer=optimizer,
-                scheduler=scheduler,
-                scaler=scaler,
-                extra={
-                    "best_metric": "val_f1",
-                    "val_f1": float(val_f1),
-                    "val_loss": float(epoch_val_loss),
-                    "val_acc": float(val_acc),
-                },
-                logger=logger,
-            )
-            logger.info(
-                f"Saved BEST-F1 model (epoch={epoch}, val_f1={val_f1:.4f}) → {best_f1_path}"
-            )
+            ckpt_path = ckpt_dir / "best_macro_f1_model.pt"
+            torch.save({"epoch": epoch, "model_state": model.state_dict()}, ckpt_path)
+            logger.info(f"✅ Saved best macro-F1 model → {ckpt_path} (val_f1={best_val_f1:.4f})")
 
-        # -------------------------
-        # ✅ Save best by ACC (ADDED)
-        # -------------------------
-        if val_acc > best_val_acc:
-            best_val_acc = val_acc
-            save_checkpoint(
-                ckpt_path=best_acc_path,
-                epoch=epoch,
-                model=model,
-                optimizer=optimizer,
-                scheduler=scheduler,
-                scaler=scaler,
-                extra={
-                    "best_metric": "val_acc",
-                    "val_acc": float(val_acc),
-                    "val_f1": float(val_f1),
-                    "val_loss": float(epoch_val_loss),
-                },
-                logger=logger,
-            )
-            logger.info(
-                f"Saved BEST-ACC model (epoch={epoch}, val_acc={val_acc:.4f}) → {best_acc_path}"
-            )
+        # Save best by val loss
+        if epoch_val_loss < best_val_loss:
+            best_val_loss = epoch_val_loss
+            ckpt_path = ckpt_dir / "best_val_loss_model.pt"
+            torch.save({"epoch": epoch, "model_state": model.state_dict()}, ckpt_path)
+            logger.info(f"✅ Saved best val-loss model → {ckpt_path} (val_loss={best_val_loss:.4f})")
 
     logger.info("Training completed")
 

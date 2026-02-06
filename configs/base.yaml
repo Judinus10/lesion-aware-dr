@@ -2,8 +2,6 @@ project_name: "lesion_aware_dr"
 run_name: "baseline_efficientnet"
 
 paths:
-  # For local: use "data"
-  # For Colab: you can override these paths in a notebook cell or edit them.
   data_dir: "data"
   raw_dir: "data/raw"
   processed_dir: "data/processed"
@@ -11,25 +9,27 @@ paths:
   checkpoints_dir: "outputs/checkpoints"
 
 model:
-  backbone: "efficientnet_b0"   # good starting backbone
+  backbone: "efficientnet_b0"
   num_classes: 5
   pretrained: true
 
 data:
-  # If true → use random fake data (for testing only)
-  use_dummy: false           # set to false when you connect real datasets
+  use_dummy: false
   image_size: 224
 
-  # Real dataset paths (used when use_dummy = false)
+  # Dataset paths
   train_csv: "/content/drive/MyDrive/Lesion_aware_DR/eyepacs/train.csv"
-  val_csv:   "/content/drive/MyDrive/Lesion_aware_DR/eyepacs/val.csv"
+  val_csv:   "/content/drive/MyDrive/Lesion_aware_DR/eyepacs/val_clean.csv"   # IMPORTANT
   image_dir: "/content/eyepacs_images/Images"
-  image_col: "image_id"        # column in CSV with filename
-  label_col: "label"        # column in CSV with label (0–4)
+  image_col: "image_id"
+  label_col: "label"
+
+  # NEW: handle class imbalance at sampling level
+  use_weighted_sampler: true
+  sampler_mode: "inverse"   # currently only inverse is used
 
 training:
   seed: 42
-  # epochs: 10
   epochs: 10
   batch_size: 8
   num_workers: 2
@@ -38,12 +38,23 @@ training:
   optimizer: "adamw"
   scheduler: "cosine"
 
-
 logging:
   use_wandb: false
   wandb_project: "lesion_aware_dr"
   wandb_entity: null
 
 loss:
-  name: "ce"         # "ce" | "focal" | "cb_focal" (later)
+  # Options: "ce" or "focal"
+  name: "ce"
+
+  # NEW: actually applies weights now (with updated classifier.py / train.py)
   use_class_weights: true
+
+  # NEW: choose how weights are computed
+  # "inverse"  -> 1 / class_count
+  # "effective" -> class-balanced effective number of samples (usually better)
+  weight_mode: "effective"
+  beta: 0.9999
+
+  # Only used if name="focal"
+  gamma: 2.0

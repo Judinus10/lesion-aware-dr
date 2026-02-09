@@ -14,16 +14,12 @@ from torch.optim.lr_scheduler import CosineAnnealingLR
 
 from tqdm import tqdm
 
+from sklearn.metrics import accuracy_score, f1_score  # ✅ use sklearn like eval.py
+
 from src.utils.logger import get_logger
 from src.utils.seed import set_seed
 from src.models import build_model
 from src.data.dr_datamodule import DRDataModule
-
-try:
-    from torchmetrics.classification import MulticlassAccuracy, MulticlassF1Score
-    _HAS_TORCHMETRICS = True
-except Exception:
-    _HAS_TORCHMETRICS = False
 
 
 # -------------------------
@@ -68,6 +64,7 @@ def compute_class_weights_from_csv(
     else:
         weights = 1.0 / counts
 
+    # normalize to mean=1 for stability
     weights = weights / weights.mean()
     return weights
 
@@ -107,7 +104,7 @@ def build_criterion(cfg: OmegaConf, device: torch.device, logger):
             beta=beta,
         )
         class_weights_t = torch.tensor(w_np, dtype=torch.float32, device=device)
-        logger.info(f"[LOSS] Using class weights (mode={weight_mode}): {w_np.round(4).tolist()}")
+        logger.info(f"[LOSS] Using class weights (mode={weight_mode}): {np.round(w_np, 4).tolist()}")
     else:
         logger.info("[LOSS] Class weights: OFF")
 
@@ -176,13 +173,6 @@ def main():
         else None
     )
 
-    if _HAS_TORCHMETRICS:
-        acc_metric = MulticlassAccuracy(num_classes=cfg.model.num_classes).to(device)
-        f1_metric = MulticlassF1Score(num_classes=cfg.model.num_classes, average="macro").to(device)
-    else:
-        acc_metric = f1_metric = None
-        logger.warning("torchmetrics not installed — metrics disabled")
-
     best_val_f1 = -1.0
     best_val_loss = float("inf")
     ckpt_dir = Path(cfg.paths.checkpoints_dir)
@@ -214,13 +204,12 @@ def main():
 
         epoch_train_loss = running_loss / len(train_loader.dataset)
 
-        # -------- VALID --------
+        # -------- VALID (sklearn full-epoch metrics ✅) --------
         model.eval()
         val_loss_sum = 0.0
 
-        if acc_metric is not None:
-            acc_metric.reset()
-            f1_metric.reset()
+        all_preds = []
+        all_labels = []
 
         val_pbar = tqdm(
             val_loader,
@@ -238,21 +227,20 @@ def main():
                 loss = criterion(logits, labels)
                 val_loss_sum += loss.item() * images.size(0)
 
-                if acc_metric is not None:
-                    preds = torch.argmax(logits, dim=1)
-                    acc_metric.update(preds, labels)
-                    f1_metric.update(preds, labels)
+                preds = torch.argmax(logits, dim=1)
+
+                all_preds.append(preds.detach().cpu())
+                all_labels.append(labels.detach().cpu())
 
                 val_pbar.set_postfix(val_loss=f"{loss.item():.4f}")
 
         epoch_val_loss = val_loss_sum / len(val_loader.dataset)
 
-        if acc_metric is not None:
-            val_acc = float(acc_metric.compute().item())
-            val_f1 = float(f1_metric.compute().item())
-        else:
-            val_acc = 0.0
-            val_f1 = 0.0
+        y_pred = torch.cat(all_preds).numpy()
+        y_true = torch.cat(all_labels).numpy()
+
+        val_acc = float(accuracy_score(y_true, y_pred))
+        val_f1 = float(f1_score(y_true, y_pred, average="macro"))  # ✅ matches eval.py
 
         if scheduler is not None:
             scheduler.step()
@@ -266,10 +254,10 @@ def main():
             f"(best_f1={best_val_f1:.4f}, best_loss={best_val_loss:.4f})"
         )
 
-        # Always save last (useful for debugging)
+        # Always save last
         torch.save({"epoch": epoch, "model_state": model.state_dict()}, ckpt_dir / "last_model.pt")
 
-        # Save best by macro F1
+        # Save best by sklearn macro F1 ✅
         if val_f1 > best_val_f1:
             best_val_f1 = val_f1
             ckpt_path = ckpt_dir / "best_macro_f1_model.pt"

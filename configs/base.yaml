@@ -17,16 +17,16 @@ data:
   use_dummy: false
   image_size: 224
 
-  # Dataset paths
   train_csv: "/content/drive/MyDrive/Lesion_aware_DR/eyepacs/train.csv"
-  val_csv:   "/content/drive/MyDrive/Lesion_aware_DR/eyepacs/val_clean.csv"   # IMPORTANT
+  val_csv:   "/content/drive/MyDrive/Lesion_aware_DR/eyepacs/val_clean.csv"
   image_dir: "/content/eyepacs_images/Images"
   image_col: "image_id"
   label_col: "label"
 
-  # NEW: handle class imbalance at sampling level
-  use_weighted_sampler: true
-  sampler_mode: "inverse"   # currently only inverse is used
+  # Use ONE balancing method at a time.
+  # Here: sampler OFF, loss weights ON.
+  use_weighted_sampler: false
+  sampler_mode: "inverse"
 
 training:
   seed: 42
@@ -44,17 +44,11 @@ logging:
   wandb_entity: null
 
 loss:
-  # Options: "ce" or "focal"
-  name: "ce"
+  # "ce" or "focal"
+  name: "focal"
 
-  # NEW: actually applies weights now (with updated classifier.py / train.py)
   use_class_weights: true
-
-  # NEW: choose how weights are computed
-  # "inverse"  -> 1 / class_count
-  # "effective" -> class-balanced effective number of samples (usually better)
   weight_mode: "effective"
   beta: 0.9999
 
-  # Only used if name="focal"
   gamma: 2.0

@@ -44,11 +44,9 @@ logging:
   wandb_entity: null
 
 loss:
-  # "ce" or "focal"
-  name: "focal"
-
-  use_class_weights: true
-  weight_mode: "effective"
+  name: "cb_focal"
   beta: 0.9999
-
   gamma: 2.0
+  alpha_mode: "effective"   # "effective" | "inverse" | "none"
+  reduction: "mean"
+  use_class_weights: false  # (not used for cb_focal)

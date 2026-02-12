@@ -8,60 +8,39 @@ import pandas as pd
 import torch
 from torch import nn
 
-try:
-    from .cb_focal_loss import CBFocalLoss  # optional (implement later)
-    _HAS_CB = True
-except Exception:
-    _HAS_CB = False
+from src.models.cb_focal_loss import build_cb_focal_from_cfg
 
 
 def _compute_class_weights_from_csv(
     csv_path: str,
     label_col: str,
     num_classes: int,
-    mode: str = "inverse",      # "inverse" or "effective"
+    mode: str = "inverse",      # "inverse" | "effective"
     beta: float = 0.9999,
 ) -> np.ndarray:
-    """
-    Compute class weights based on training label distribution.
-
-    mode:
-      - "inverse": w_c = 1 / n_c
-      - "effective": Class-Balanced weights via effective number of samples:
-          w_c = (1 - beta) / (1 - beta^n_c)
-
-    Returns:
-      weights: np.ndarray of shape [num_classes], normalized to mean=1
-    """
     df = pd.read_csv(csv_path)
     labels = df[label_col].astype(int).values
 
-    counts = np.bincount(labels, minlength=num_classes).astype(np.float32)
-    counts = np.maximum(counts, 1.0)  # avoid divide-by-zero
+    counts = np.bincount(labels, minlength=num_classes).astype(np.float64)
+    counts = np.maximum(counts, 1.0)
 
     mode = (mode or "inverse").lower()
     if mode == "effective":
         effective_num = 1.0 - np.power(beta, counts)
-        weights = (1.0 - beta) / np.maximum(effective_num, 1e-8)
+        weights = (1.0 - beta) / np.maximum(effective_num, 1e-12)
     else:
         weights = 1.0 / counts
 
-    # normalize to mean=1 for stable optimization
-    weights = weights / np.mean(weights)
-    return weights
+    weights = weights / np.mean(weights)  # normalize mean=1
+    return weights.astype(np.float32)
 
 
 class FocalLoss(nn.Module):
-    """
-    Multi-class Focal Loss.
-
-    alpha: Optional Tensor [C] class weights (like weighted CE)
-    gamma: focusing parameter
-    """
-    def __init__(self, gamma: float = 2.0, alpha: Optional[torch.Tensor] = None):
+    def __init__(self, gamma: float = 2.0, alpha: Optional[torch.Tensor] = None, reduction: str = "mean"):
         super().__init__()
         self.gamma = float(gamma)
-        self.alpha = alpha  # Tensor [C] on correct device, or None
+        self.alpha = alpha
+        self.reduction = str(reduction).lower()
 
     def forward(self, logits: torch.Tensor, targets: torch.Tensor) -> torch.Tensor:
         ce = nn.functional.cross_entropy(logits, targets, reduction="none")
@@ -69,73 +48,61 @@ class FocalLoss(nn.Module):
         loss = ((1.0 - pt) ** self.gamma) * ce
 
         if self.alpha is not None:
-            # alpha indexed by class id
-            at = self.alpha[targets]
-            loss = at * loss
+            loss = self.alpha[targets] * loss
 
+        if self.reduction == "none":
+            return loss
+        if self.reduction == "sum":
+            return loss.sum()
         return loss.mean()
 
 
 def get_loss(cfg, device: Optional[torch.device] = None) -> Callable:
     """
-    Return a loss function based on cfg.loss.name.
+    Central loss factory.
+
     Supports:
-      - 'ce'        : CrossEntropy (optionally class-weighted)
-      - 'focal'     : FocalLoss (optionally class-weighted via alpha)
-      - 'cb_focal'  : Class-Balanced Focal (if cb_focal_loss.py exists)
+      - ce       : CrossEntropyLoss (optionally weighted)
+      - focal    : FocalLoss (optionally weighted)
+      - cb_focal : Class-Balanced Focal Loss (alpha from counts, focal gamma)
 
-    IMPORTANT:
-    - If cfg.loss.use_class_weights is true, weights are computed from cfg.data.train_csv.
-    - device is optional; if not passed, weights will be on CPU (still works, but slower / may error if indexing on GPU).
-      Best practice: pass the same device used for the model.
+    Best practice: pass device so weights live on GPU.
     """
+    if device is None:
+        device = torch.device("cpu")
+
     loss_cfg = getattr(cfg, "loss", None)
-    loss_name = getattr(loss_cfg, "name", "ce") if loss_cfg is not None else "ce"
-    loss_name = str(loss_name).lower()
+    loss_name = str(getattr(loss_cfg, "name", "ce")).lower() if loss_cfg is not None else "ce"
 
-    # Optional class weighting
+    # shared fields (only used for ce/focal)
     use_class_weights = bool(getattr(loss_cfg, "use_class_weights", False)) if loss_cfg is not None else False
-    weight_mode = str(getattr(loss_cfg, "weight_mode", "inverse")).lower() if loss_cfg is not None else "inverse"
+    weight_mode = str(getattr(loss_cfg, "weight_mode", "effective")).lower() if loss_cfg is not None else "effective"
     beta = float(getattr(loss_cfg, "beta", 0.9999)) if loss_cfg is not None else 0.9999
+    reduction = str(getattr(loss_cfg, "reduction", "mean")).lower() if loss_cfg is not None else "mean"
 
+    # ---- cb_focal ----
+    if loss_name == "cb_focal":
+        return build_cb_focal_from_cfg(cfg, device=device)
+
+    # ---- optional weights for ce/focal ----
     class_weights_t: Optional[torch.Tensor] = None
     if use_class_weights:
         w_np = _compute_class_weights_from_csv(
-            csv_path=cfg.data.train_csv,
-            label_col=cfg.data.label_col,
+            csv_path=str(cfg.data.train_csv),
+            label_col=str(cfg.data.label_col),
             num_classes=int(cfg.model.num_classes),
             mode=weight_mode,
             beta=beta,
         )
-        class_weights_t = torch.tensor(w_np, dtype=torch.float32)
-        if device is not None:
-            class_weights_t = class_weights_t.to(device)
+        class_weights_t = torch.tensor(w_np, dtype=torch.float32, device=device)
 
-    # ---- Loss selection ----
     if loss_name == "ce":
-        # weighted CE if class_weights_t provided
+        # NOTE: torch CE supports weight but not reduction="none"/"sum" config in same way.
+        # We keep default mean unless you want more control.
         return nn.CrossEntropyLoss(weight=class_weights_t)
 
-    elif loss_name == "focal":
+    if loss_name == "focal":
         gamma = float(getattr(loss_cfg, "gamma", 2.0)) if loss_cfg is not None else 2.0
-        # If user provided explicit alpha in cfg, allow it; otherwise use computed weights
-        alpha_cfg = getattr(loss_cfg, "alpha", None) if loss_cfg is not None else None
+        return FocalLoss(gamma=gamma, alpha=class_weights_t, reduction=reduction)
 
-        if alpha_cfg is not None:
-            # allow list or tensor in yaml
-            alpha_t = torch.tensor(alpha_cfg, dtype=torch.float32)
-            if device is not None:
-                alpha_t = alpha_t.to(device)
-            return FocalLoss(gamma=gamma, alpha=alpha_t)
-
-        return FocalLoss(gamma=gamma, alpha=class_weights_t)
-
-    elif loss_name == "cb_focal":
-        if not _HAS_CB:
-            raise ImportError(
-                "CBFocalLoss requested but cb_focal_loss.py is not implemented/importable."
-            )
-        return CBFocalLoss(cfg)
-
-    else:
-        raise ValueError(f"Unknown loss type: {loss_name}")
+    raise ValueError(f"Unknown loss type: {loss_name}")

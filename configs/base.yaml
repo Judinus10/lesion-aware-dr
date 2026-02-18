@@ -1,5 +1,5 @@
 project_name: "lesion_aware_dr"
-run_name: "baseline_efficientnet"
+run_name: "efficientnet_cb_focal"
 
 paths:
   data_dir: "data"
@@ -30,9 +30,9 @@ data:
 
 training:
   seed: 42
-  epochs: 10
-  batch_size: 8
-  num_workers: 2
+  epochs: 20
+  batch_size: 16
+  num_workers: 4
   lr: 1e-4
   weight_decay: 1e-5
   optimizer: "adamw"

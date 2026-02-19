@@ -30,7 +30,7 @@ data:
 
 training:
   seed: 42
-  epochs: 20
+  epochs: 10
   batch_size: 16
   num_workers: 4
   lr: 1e-4

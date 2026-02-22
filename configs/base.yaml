@@ -25,14 +25,14 @@ data:
 
   # Use ONE balancing method at a time.
   # Here: sampler OFF, loss weights ON.
-  use_weighted_sampler: false
+  use_weighted_sampler: true
   sampler_mode: "inverse"
 
 training:
   seed: 42
-  epochs: 10
+  epochs: 12
   batch_size: 16
-  num_workers: 4
+  num_workers: 2
   lr: 1e-4
   weight_decay: 1e-5
   optimizer: "adamw"
@@ -44,9 +44,9 @@ logging:
   wandb_entity: null
 
 loss:
-  name: "cb_focal"
-  beta: 0.9999
-  gamma: 2.0
-  alpha_mode: "effective"   # "effective" | "inverse" | "none"
+  name: "ce"
+  beta: 0.999
+  gamma: 2.5
+  alpha_mode: "effective"
   reduction: "mean"
-  use_class_weights: false  # (not used for cb_focal)
+  use_class_weights: false

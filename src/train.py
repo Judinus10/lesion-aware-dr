@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, Tuple
 
 import yaml
 from omegaconf import OmegaConf
@@ -65,6 +65,20 @@ def parse_args():
         help="Accumulate gradients for N steps before optimizer.step().",
     )
 
+    # ✅ early stopping on macro-F1
+    parser.add_argument(
+        "--early_stop_patience",
+        type=int,
+        default=3,
+        help="Stop if macro-F1 does not improve for this many epochs. Set 0 to disable.",
+    )
+    parser.add_argument(
+        "--early_stop_min_delta",
+        type=float,
+        default=0.0,
+        help="Minimum macro-F1 improvement to reset patience (e.g., 0.001).",
+    )
+
     return parser.parse_args()
 
 
@@ -119,6 +133,47 @@ def load_checkpoint(
     best_val_loss = float(ckpt.get("best_val_loss", float("inf")))
 
     return start_epoch, step_in_epoch, best_val_f1, best_val_loss
+
+
+def load_existing_best_baselines(
+    ckpt_dir: Path, logger
+) -> Tuple[float, float]:
+    """
+    Option 2:
+    If best checkpoints already exist from previous days/runs,
+    use their stored best metrics as baselines so we don't overwrite with worse models.
+    """
+    best_val_f1 = -1.0
+    best_val_loss = float("inf")
+
+    best_f1_path = ckpt_dir / "best_macro_f1_model.pt"
+    best_loss_path = ckpt_dir / "best_val_loss_model.pt"
+
+    if best_f1_path.exists():
+        try:
+            prev = torch.load(best_f1_path, map_location="cpu")
+            best_val_f1 = float(prev.get("best_val_f1", -1.0))
+            logger.info(
+                f"[GLOBAL BEST] Loaded existing best macro-F1={best_val_f1:.4f} from {best_f1_path}"
+            )
+        except Exception as e:
+            logger.warning(
+                f"[GLOBAL BEST] Failed to read {best_f1_path} (will ignore). Error: {e}"
+            )
+
+    if best_loss_path.exists():
+        try:
+            prev = torch.load(best_loss_path, map_location="cpu")
+            best_val_loss = float(prev.get("best_val_loss", float("inf")))
+            logger.info(
+                f"[GLOBAL BEST] Loaded existing best val-loss={best_val_loss:.4f} from {best_loss_path}"
+            )
+        except Exception as e:
+            logger.warning(
+                f"[GLOBAL BEST] Failed to read {best_loss_path} (will ignore). Error: {e}"
+            )
+
+    return best_val_f1, best_val_loss
 
 
 # -------------------------
@@ -188,12 +243,21 @@ def main():
     use_amp = bool(args.amp and device.type == "cuda")
     scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
 
-    # Resume
+    # -------------------------
+    # Baselines / Resume
+    # -------------------------
+    # Default (fresh run)
     best_val_f1 = -1.0
     best_val_loss = float("inf")
     start_epoch = 1
     resume_step_in_epoch = 0
 
+    # ✅ Option 2 baseline: protect previous-day best from being overwritten
+    # Only do this when NOT resuming. If resuming, checkpoint already contains best metrics.
+    if not args.resume_ckpt:
+        best_val_f1, best_val_loss = load_existing_best_baselines(ckpt_dir, logger)
+
+    # Resume (has priority)
     if args.resume_ckpt:
         resume_path = args.resume_ckpt
         logger.info(f"[RESUME] Loading checkpoint: {resume_path}")
@@ -211,6 +275,11 @@ def main():
     total_epochs = int(cfg.training.epochs)
     grad_accum = max(1, int(args.grad_accum))
     save_every_steps = max(0, int(args.save_every_steps))
+
+    # ✅ early stopping state
+    patience = max(0, int(args.early_stop_patience))
+    min_delta = float(args.early_stop_min_delta)
+    bad_epochs = 0  # how many epochs without improvement
 
     for epoch in range(start_epoch, total_epochs + 1):
 
@@ -343,8 +412,9 @@ def main():
             cfg=cfg,
         )
 
-        # Save best by macro F1
-        if val_f1 > best_val_f1:
+        # Save best by macro F1 (GLOBAL BEST across runs ✅)
+        improved_f1 = val_f1 > (best_val_f1 + min_delta)
+        if improved_f1:
             best_val_f1 = val_f1
             save_checkpoint(
                 ckpt_dir / "best_macro_f1_model.pt",
@@ -358,8 +428,11 @@ def main():
                 cfg=cfg,
             )
             logger.info(f"✅ Saved best macro-F1 model (val_f1={best_val_f1:.4f})")
+            bad_epochs = 0  # ✅ reset early stopping counter
+        else:
+            bad_epochs += 1
 
-        # Save best by val loss
+        # Save best by val loss (GLOBAL BEST across runs ✅)
         if epoch_val_loss < best_val_loss:
             best_val_loss = epoch_val_loss
             save_checkpoint(
@@ -374,6 +447,14 @@ def main():
                 cfg=cfg,
             )
             logger.info(f"✅ Saved best val-loss model (val_loss={best_val_loss:.4f})")
+
+        # ✅ EARLY STOPPING (macro-F1)
+        if patience > 0 and bad_epochs >= patience:
+            logger.info(
+                f"🛑 Early stopping triggered: no macro-F1 improvement for {bad_epochs} epoch(s). "
+                f"Best macro-F1={best_val_f1:.4f}"
+            )
+            break
 
     logger.info("Training completed")
 

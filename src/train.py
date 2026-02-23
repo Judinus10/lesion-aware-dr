@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
-from typing import Optional, Dict, Any, Tuple
+from typing import Optional, Dict, Any
+from datetime import datetime
 
 import yaml
 from omegaconf import OmegaConf
@@ -39,7 +40,7 @@ def parse_args():
         "--resume_ckpt",
         type=str,
         default=None,
-        help="Path to checkpoint (.pt) to resume from (e.g., outputs/checkpoints/last_model.pt)",
+        help="Path to checkpoint (.pt) to resume from (e.g., outputs/2026-02-23/checkpoints/last_model.pt)",
     )
 
     # ✅ mid-epoch save to avoid losing progress on Colab timeout
@@ -77,6 +78,14 @@ def parse_args():
         type=float,
         default=0.0,
         help="Minimum macro-F1 improvement to reset patience (e.g., 0.001).",
+    )
+
+    # ✅ optional run folder name override (keeps your date structure but allows custom)
+    parser.add_argument(
+        "--run_folder",
+        type=str,
+        default=None,
+        help="Optional folder name under outputs/ (e.g., 2026-02-23_ce_run1). If not set, uses today's date YYYY-MM-DD.",
     )
 
     return parser.parse_args()
@@ -135,45 +144,12 @@ def load_checkpoint(
     return start_epoch, step_in_epoch, best_val_f1, best_val_loss
 
 
-def load_existing_best_baselines(
-    ckpt_dir: Path, logger
-) -> Tuple[float, float]:
-    """
-    Option 2:
-    If best checkpoints already exist from previous days/runs,
-    use their stored best metrics as baselines so we don't overwrite with worse models.
-    """
-    best_val_f1 = -1.0
-    best_val_loss = float("inf")
-
-    best_f1_path = ckpt_dir / "best_macro_f1_model.pt"
-    best_loss_path = ckpt_dir / "best_val_loss_model.pt"
-
-    if best_f1_path.exists():
-        try:
-            prev = torch.load(best_f1_path, map_location="cpu")
-            best_val_f1 = float(prev.get("best_val_f1", -1.0))
-            logger.info(
-                f"[GLOBAL BEST] Loaded existing best macro-F1={best_val_f1:.4f} from {best_f1_path}"
-            )
-        except Exception as e:
-            logger.warning(
-                f"[GLOBAL BEST] Failed to read {best_f1_path} (will ignore). Error: {e}"
-            )
-
-    if best_loss_path.exists():
-        try:
-            prev = torch.load(best_loss_path, map_location="cpu")
-            best_val_loss = float(prev.get("best_val_loss", float("inf")))
-            logger.info(
-                f"[GLOBAL BEST] Loaded existing best val-loss={best_val_loss:.4f} from {best_loss_path}"
-            )
-        except Exception as e:
-            logger.warning(
-                f"[GLOBAL BEST] Failed to read {best_loss_path} (will ignore). Error: {e}"
-            )
-
-    return best_val_f1, best_val_loss
+def save_cfg_snapshot(cfg: OmegaConf, run_dir: Path) -> None:
+    """Save the resolved config used for this run (so you can compare later)."""
+    run_dir.mkdir(parents=True, exist_ok=True)
+    snap_path = run_dir / "config_used.yaml"
+    with open(snap_path, "w") as f:
+        f.write(OmegaConf.to_yaml(cfg))
 
 
 # -------------------------
@@ -186,21 +162,52 @@ def main():
     cfg.training.lr = float(cfg.training.lr)
     cfg.training.weight_decay = float(cfg.training.weight_decay)
 
-    # dirs
-    Path(cfg.paths.outputs_dir).mkdir(parents=True, exist_ok=True)
-    Path(cfg.paths.checkpoints_dir).mkdir(parents=True, exist_ok=True)
-    ckpt_dir = Path(cfg.paths.checkpoints_dir)
+    # logger (create early)
+    logger = get_logger("train")
+    logger.info("Starting training script")
+
+    # device
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    logger.info(f"Using device: {device}")
+
+    # -------------------------
+    # Output folders (DATED RUN)
+    # -------------------------
+    # If resuming: keep the folder of the checkpoint
+    # If not resuming: create outputs/<YYYY-MM-DD>/checkpoints/
+    base_outputs = Path(cfg.paths.outputs_dir)
+
+    if args.resume_ckpt:
+        resume_path = Path(args.resume_ckpt)
+        ckpt_dir = resume_path.parent
+        run_dir = ckpt_dir.parent
+        logger.info(f"[RUN DIR] Resuming inside existing run folder: {run_dir}")
+    else:
+        date_folder = args.run_folder or datetime.now().strftime("%Y-%m-%d")
+        # auto-increment if folder already exists: 2026-02-23, 2026-02-23_2, 2026-02-23_3...
+        run_dir = base_outputs / date_folder
+        if run_dir.exists():
+            i = 2
+            while (base_outputs / f"{date_folder}_{i}").exists():
+                i += 1
+            run_dir = base_outputs / f"{date_folder}_{i}"
+
+        ckpt_dir = run_dir / "checkpoints"
+        ckpt_dir.mkdir(parents=True, exist_ok=True)
+        ckpt_dir.mkdir(parents=True, exist_ok=True)
+        logger.info(f"[RUN DIR] New run folder: {run_dir}")
+        logger.info(f"[RUN DIR] Checkpoints folder: {ckpt_dir}")
+
+    # overwrite cfg paths so anything else that reads cfg uses THIS run folder
+    cfg.paths.outputs_dir = str(run_dir)
+    cfg.paths.checkpoints_dir = str(ckpt_dir)
+
+    # save config snapshot for later comparison
+    logger.info(f"Config:\n{OmegaConf.to_yaml(cfg)}")
+    save_cfg_snapshot(cfg, run_dir)
 
     # seed
     set_seed(cfg.training.seed)
-
-    # logger
-    logger = get_logger("train")
-    logger.info("Starting training script")
-    logger.info(f"Config:\n{OmegaConf.to_yaml(cfg)}")
-
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    logger.info(f"Using device: {device}")
 
     # -------------------------
     # Data
@@ -244,25 +251,17 @@ def main():
     scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
 
     # -------------------------
-    # Baselines / Resume
+    # Resume state (NO global-best comparison)
     # -------------------------
-    # Default (fresh run)
     best_val_f1 = -1.0
     best_val_loss = float("inf")
     start_epoch = 1
     resume_step_in_epoch = 0
 
-    # ✅ Option 2 baseline: protect previous-day best from being overwritten
-    # Only do this when NOT resuming. If resuming, checkpoint already contains best metrics.
-    if not args.resume_ckpt:
-        best_val_f1, best_val_loss = load_existing_best_baselines(ckpt_dir, logger)
-
-    # Resume (has priority)
     if args.resume_ckpt:
-        resume_path = args.resume_ckpt
-        logger.info(f"[RESUME] Loading checkpoint: {resume_path}")
+        logger.info(f"[RESUME] Loading checkpoint: {args.resume_ckpt}")
         start_epoch, resume_step_in_epoch, best_val_f1, best_val_loss = load_checkpoint(
-            resume_path, model, optimizer=optimizer, scheduler=scheduler, device=device
+            args.resume_ckpt, model, optimizer=optimizer, scheduler=scheduler, device=device
         )
         logger.info(
             f"[RESUME] start_epoch={start_epoch}, resume_step_in_epoch={resume_step_in_epoch}, "
@@ -276,10 +275,10 @@ def main():
     grad_accum = max(1, int(args.grad_accum))
     save_every_steps = max(0, int(args.save_every_steps))
 
-    # ✅ early stopping state
+    # early stopping state (you can disable by setting patience=0 or commenting the block below)
     patience = max(0, int(args.early_stop_patience))
     min_delta = float(args.early_stop_min_delta)
-    bad_epochs = 0  # how many epochs without improvement
+    bad_epochs = 0
 
     for epoch in range(start_epoch, total_epochs + 1):
 
@@ -399,7 +398,7 @@ def main():
             f"(best_f1={best_val_f1:.4f}, best_loss={best_val_loss:.4f})"
         )
 
-        # Always save last (FULL STATE ✅)
+        # Always save last (FULL STATE ✅) into THIS run folder
         save_checkpoint(
             ckpt_dir / "last_model.pt",
             epoch=epoch,
@@ -412,7 +411,7 @@ def main():
             cfg=cfg,
         )
 
-        # Save best by macro F1 (GLOBAL BEST across runs ✅)
+        # Save best by macro F1 (within this run only ✅)
         improved_f1 = val_f1 > (best_val_f1 + min_delta)
         if improved_f1:
             best_val_f1 = val_f1
@@ -427,12 +426,12 @@ def main():
                 best_val_loss=best_val_loss,
                 cfg=cfg,
             )
-            logger.info(f"✅ Saved best macro-F1 model (val_f1={best_val_f1:.4f})")
-            bad_epochs = 0  # ✅ reset early stopping counter
+            logger.info(f"✅ Saved best macro-F1 model for THIS RUN (val_f1={best_val_f1:.4f})")
+            bad_epochs = 0
         else:
             bad_epochs += 1
 
-        # Save best by val loss (GLOBAL BEST across runs ✅)
+        # Save best by val loss (within this run only ✅)
         if epoch_val_loss < best_val_loss:
             best_val_loss = epoch_val_loss
             save_checkpoint(
@@ -446,17 +445,17 @@ def main():
                 best_val_loss=best_val_loss,
                 cfg=cfg,
             )
-            logger.info(f"✅ Saved best val-loss model (val_loss={best_val_loss:.4f})")
+            logger.info(f"✅ Saved best val-loss model for THIS RUN (val_loss={best_val_loss:.4f})")
 
-        # ✅ EARLY STOPPING (macro-F1)
-        if patience > 0 and bad_epochs >= patience:
-            logger.info(
-                f"🛑 Early stopping triggered: no macro-F1 improvement for {bad_epochs} epoch(s). "
-                f"Best macro-F1={best_val_f1:.4f}"
-            )
-            break
+        # ✅ EARLY STOPPING (macro-F1)  -> you already commented it, keep it commented if you want
+        # if patience > 0 and bad_epochs >= patience:
+        #     logger.info(
+        #         f"🛑 Early stopping triggered: no macro-F1 improvement for {bad_epochs} epoch(s). "
+        #         f"Best macro-F1={best_val_f1:.4f}"
+        #     )
+        #     break
 
-    logger.info("Training completed")
+    logger.info(f"Training completed. Run saved at: {run_dir}")
 
 
 if __name__ == "__main__":

@@ -1,64 +1,125 @@
+import os
 import streamlit as st
 import torch
-import os
 
-# Optional: keep these consistent with your other pages
-CKPT_PATH = "outputs/2026-02-27/checkpoints/best_macro_f1_model.pt"
-MODEL_NAME = "efficientnet_b0"
-CLASS_NAMES = ["No DR (0)", "Mild (1)", "Moderate (2)", "Severe (3)", "Proliferative (4)"]
+from PIL import Image
+
+import utils
+
 
 st.set_page_config(page_title="Dashboard", layout="wide")
 
-st.title("Lesion-Aware DR Grading System")
-st.caption("Demo UI: Predict DR grade + Explainability (Grad-CAM++)")
-
-# -------- Status Cards --------
-c1, c2, c3 = st.columns(3)
-
-with c1:
-    st.metric("Device", "CUDA ✅" if torch.cuda.is_available() else "CPU")
-
-with c2:
-    st.metric("Model", MODEL_NAME)
-
-with c3:
-    ckpt_ok = os.path.exists(CKPT_PATH)
-    st.metric("Checkpoint", "Found ✅" if ckpt_ok else "Missing ❌")
-
-st.divider()
-
-# -------- How to Use --------
-st.subheader("How to Use")
+# Hide sidebar nav (we want 2-page clean flow)
 st.markdown(
     """
-1) Go to **Predict** page → upload a fundus image → get **grade + probabilities**  
-2) Go to **Explainability** page → upload the same image → get **Grad-CAM++ heatmap**  
-"""
+    <style>
+      [data-testid="stSidebar"] {display: none;}
+      [data-testid="stSidebarNav"] {display: none;}
+    </style>
+    """,
+    unsafe_allow_html=True,
 )
 
-# -------- Classes --------
-st.subheader("DR Classes")
-st.write("The system predicts one of the following grades:")
-for name in CLASS_NAMES:
-    st.write(f"- {name}")
+# ---- Session init ----
+if "last_result" not in st.session_state:
+    st.session_state.last_result = None
+if "last_uploaded_name" not in st.session_state:
+    st.session_state.last_uploaded_name = ""
+if "preferred_layer" not in st.session_state:
+    st.session_state.preferred_layer = None
+
+
+# ---- Header ----
+st.title("Lesion-Aware DR Prediction System")
+st.caption("DR grading + Grad-CAM++ explainability (student demo, non-clinical)")
+
+# ---- Top status row ----
+c1, c2, c3 = st.columns(3)
+with c1:
+    st.metric("Device", "CUDA ✅" if torch.cuda.is_available() else "CPU")
+with c2:
+    st.metric("Model", utils.MODEL_NAME)
+with c3:
+    st.metric("Checkpoint", "Found ✅" if os.path.exists(utils.CKPT_PATH) else "Missing ❌")
 
 st.divider()
 
-# -------- Notes / Warnings --------
-st.subheader("Notes")
-st.warning(
-    "This is a student research demo. Not for clinical diagnosis. "
-    "Heatmaps are *explanations*, not proof of medical correctness."
-)
+# ---- Layout: Left main (upload + preview + predict), Right (Rules + View history)
+left, right = st.columns([2.2, 1.0], gap="large")
 
-# -------- Quick Troubleshooting --------
-with st.expander("Quick Troubleshooting"):
-    st.write("If Checkpoint shows Missing ❌:")
-    st.code(
-        "1) Verify CKPT_PATH inside Dashboard/Predict/Explainability\n"
-        "2) Make sure you run Streamlit from project root\n"
-        "3) Confirm the checkpoint file exists in that path"
+with right:
+    st.subheader("Rules / Notes")
+    st.info(
+        "✅ Upload a clear fundus image\n\n"
+        "✅ Supported: JPG / PNG\n\n"
+        "✅ Best results when retina is centered and not overexposed\n\n"
+        "⚠ This is a student research demo\n\n"
+        "⚠ Not for clinical diagnosis\n\n"
+        "⚠ Heatmaps are explanations, not proof"
     )
-    st.write("If predictions are wrong or error happens:")
-    st.write("- MODEL_NAME must match the model used during training")
-    st.write("- IMG_SIZE / preprocessing must match training")
+
+    st.markdown("---")
+    if st.button("📚 View Saved Cases", use_container_width=True):
+        st.switch_page("pages/2_Analysis.py")
+
+with left:
+    st.subheader("Upload Fundus Image")
+    uploaded = st.file_uploader("Choose an image", type=["jpg", "jpeg", "png"])
+
+    if not uploaded:
+        st.warning("Upload an image first. No image = no prediction.")
+        st.stop()
+
+    st.session_state.last_uploaded_name = uploaded.name
+
+    pil_img = Image.open(uploaded)
+
+    pcol, bcol = st.columns([1.4, 1.0], gap="large")
+
+    with pcol:
+        st.markdown("### Preview")
+        st.image(pil_img, use_container_width=True)
+
+    with bcol:
+        st.markdown("### Actions")
+
+        # Optional: allow user to choose target layer quality
+        # We'll populate conv layers after model loads
+        try:
+            # Load model (cache via Streamlit wrapper below)
+            @st.cache_resource
+            def _cached_model():
+                return utils.load_model_cached()
+
+            model, device = _cached_model()
+            convs = utils.list_conv2d_layers(model)
+            layer_names = [n for n, _ in convs] if convs else []
+        except Exception as e:
+            st.error(str(e))
+            st.stop()
+
+        if layer_names:
+            picked = st.selectbox(
+                "Grad-CAM Target Layer (optional)",
+                options=["(auto)"] + layer_names,
+                index=0,
+                help="Auto is usually fine. Picking a slightly earlier conv can reduce border bias sometimes.",
+            )
+            st.session_state.preferred_layer = None if picked == "(auto)" else picked
+
+        st.markdown("")
+
+        if st.button("🔍 Predict & Analyze", type="primary", use_container_width=True):
+            with st.spinner("Running inference…"):
+                result = utils.predict(model, device, pil_img)
+
+                # store everything needed for Analysis page
+                st.session_state.last_result = {
+                    "pred_idx": result["pred_idx"],
+                    "pred_name": result["pred_name"],
+                    "probs": result["probs"],
+                    "raw_rgb": result["raw_rgb"],
+                    "input_tensor": result["input_tensor"].detach(),
+                }
+
+            st.switch_page("pages/2_Analysis.py")

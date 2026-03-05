@@ -8,6 +8,9 @@ from datetime import datetime
 import yaml
 from omegaconf import OmegaConf
 
+import numpy as np
+import pandas as pd
+
 import torch
 from torch import optim
 from torch.optim.lr_scheduler import CosineAnnealingLR
@@ -116,7 +119,6 @@ def save_checkpoint(
     }
     if scheduler is not None:
         state["scheduler_state"] = scheduler.state_dict()
-
     torch.save(state, path)
 
 
@@ -153,6 +155,31 @@ def save_cfg_snapshot(cfg: OmegaConf, run_dir: Path) -> None:
 
 
 # -------------------------
+# Optional: consistent prediction for adjusted-logit losses
+# -------------------------
+def _compute_counts_and_log_priors_from_train_csv(cfg) -> tuple[torch.Tensor, torch.Tensor]:
+    """
+    For VAL/metrics consistency: if loss uses logit adjustment / balanced softmax,
+    we must also apply the same adjustment before argmax in validation.
+    We compute from train_csv so it's consistent with your loss factory.
+    """
+    train_csv = str(cfg.data.train_csv)
+    label_col = str(cfg.data.label_col)
+    num_classes = int(cfg.model.num_classes)
+
+    df = pd.read_csv(train_csv)
+    labels = df[label_col].astype(int).values
+    counts = np.bincount(labels, minlength=num_classes).astype(np.float64)
+    counts = np.maximum(counts, 1.0)
+    priors = counts / counts.sum()
+    log_priors = np.log(priors + 1e-12).astype(np.float32)
+
+    counts_t = torch.tensor(counts.astype(np.float32))
+    log_priors_t = torch.tensor(log_priors)
+    return counts_t, log_priors_t
+
+
+# -------------------------
 # Main
 # -------------------------
 def main():
@@ -173,8 +200,6 @@ def main():
     # -------------------------
     # Output folders (DATED RUN)
     # -------------------------
-    # If resuming: keep the folder of the checkpoint
-    # If not resuming: create outputs/<YYYY-MM-DD>/checkpoints/
     base_outputs = Path(cfg.paths.outputs_dir)
 
     if args.resume_ckpt:
@@ -184,7 +209,6 @@ def main():
         logger.info(f"[RUN DIR] Resuming inside existing run folder: {run_dir}")
     else:
         date_folder = args.run_folder or datetime.now().strftime("%Y-%m-%d")
-        # auto-increment if folder already exists: 2026-02-23, 2026-02-23_2, 2026-02-23_3...
         run_dir = base_outputs / date_folder
         if run_dir.exists():
             i = 2
@@ -193,7 +217,6 @@ def main():
             run_dir = base_outputs / f"{date_folder}_{i}"
 
         ckpt_dir = run_dir / "checkpoints"
-        ckpt_dir.mkdir(parents=True, exist_ok=True)
         ckpt_dir.mkdir(parents=True, exist_ok=True)
         logger.info(f"[RUN DIR] New run folder: {run_dir}")
         logger.info(f"[RUN DIR] Checkpoints folder: {ckpt_dir}")
@@ -230,10 +253,29 @@ def main():
         pretrained=cfg.model.pretrained,
     ).to(device)
 
-    # Loss (ce / focal / cb_focal)
+    # -------------------------
+    # Loss (single source of truth)
+    # -------------------------
     criterion = get_loss(cfg, device=device)
 
+    # For validation argmax consistency if using adjusted-logit losses
+    loss_name = str(getattr(getattr(cfg, "loss", None), "name", "ce")).lower()
+    needs_adjusted_pred = loss_name in {"logit_adjusted_ce", "balanced_softmax"}
+
+    tau = float(getattr(getattr(cfg, "loss", None), "tau", 1.0))  # only used for logit_adjusted_ce
+    counts_t_cpu, log_priors_t_cpu = _compute_counts_and_log_priors_from_train_csv(cfg)
+    class_counts_t = counts_t_cpu.to(device)
+    log_priors_t = log_priors_t_cpu.to(device)
+
+    # Optional logging
+    logger.info(f"Loss name: {loss_name}")
+    if needs_adjusted_pred:
+        logger.info(f"[VAL PRED] Using adjusted logits for argmax to match loss.")
+        logger.info(f"[VAL PRED] tau={tau} (only affects logit_adjusted_ce)")
+
+    # -------------------------
     # Optimizer / scheduler
+    # -------------------------
     optimizer = optim.AdamW(
         model.parameters(),
         lr=cfg.training.lr,
@@ -251,7 +293,7 @@ def main():
     scaler = torch.cuda.amp.GradScaler(enabled=use_amp)
 
     # -------------------------
-    # Resume state (NO global-best comparison)
+    # Resume state
     # -------------------------
     best_val_f1 = -1.0
     best_val_loss = float("inf")
@@ -275,7 +317,6 @@ def main():
     grad_accum = max(1, int(args.grad_accum))
     save_every_steps = max(0, int(args.save_every_steps))
 
-    # early stopping state (you can disable by setting patience=0 or commenting the block below)
     patience = max(0, int(args.early_stop_patience))
     min_delta = float(args.early_stop_min_delta)
     bad_epochs = 0
@@ -296,7 +337,6 @@ def main():
         optimizer.zero_grad(set_to_none=True)
 
         for step_idx, batch in enumerate(train_pbar, start=1):
-            # if resuming mid-epoch, skip steps already done
             if epoch == start_epoch and resume_step_in_epoch > 0 and step_idx <= resume_step_in_epoch:
                 continue
 
@@ -310,7 +350,6 @@ def main():
 
             scaler.scale(loss_to_backprop).backward()
 
-            # step optimizer every grad_accum steps
             if step_idx % grad_accum == 0:
                 scaler.step(optimizer)
                 scaler.update()
@@ -323,7 +362,6 @@ def main():
                 lr=f"{optimizer.param_groups[0]['lr']:.2e}",
             )
 
-            # ✅ mid-epoch checkpoint
             if save_every_steps > 0 and (step_idx % save_every_steps == 0):
                 tmp_path = ckpt_dir / "last_model.pt"
                 save_checkpoint(
@@ -339,15 +377,12 @@ def main():
                 )
                 logger.info(f"[CKPT] Saved mid-epoch checkpoint at epoch={epoch}, step={step_idx}")
 
-        # flush if last steps not divisible by grad_accum
         if (len(train_loader) % grad_accum) != 0:
             scaler.step(optimizer)
             scaler.update()
             optimizer.zero_grad(set_to_none=True)
 
         epoch_train_loss = train_loss_sum / len(train_loader.dataset)
-
-        # after first resumed epoch, stop skipping
         resume_step_in_epoch = 0
 
         # -------- VALID --------
@@ -369,10 +404,21 @@ def main():
                 labels = batch["label"].to(device, non_blocking=True)
 
                 logits = model(images)
+
+                # ✅ loss uses criterion (which may adjust internally)
                 loss = criterion(logits, labels)
                 val_loss_sum += loss.item() * images.size(0)
 
-                preds = torch.argmax(logits, dim=1)
+                # ✅ metrics: make argmax consistent with the loss decision boundary
+                if needs_adjusted_pred:
+                    if loss_name == "logit_adjusted_ce":
+                        logits_for_pred = logits + tau * log_priors_t
+                    else:  # balanced_softmax
+                        logits_for_pred = logits + torch.log(class_counts_t + 1e-12)
+                    preds = torch.argmax(logits_for_pred, dim=1)
+                else:
+                    preds = torch.argmax(logits, dim=1)
+
                 all_preds.append(preds.detach().cpu())
                 all_labels.append(labels.detach().cpu())
 
@@ -398,7 +444,7 @@ def main():
             f"(best_f1={best_val_f1:.4f}, best_loss={best_val_loss:.4f})"
         )
 
-        # Always save last (FULL STATE ✅) into THIS run folder
+        # Always save last
         save_checkpoint(
             ckpt_dir / "last_model.pt",
             epoch=epoch,
@@ -411,7 +457,7 @@ def main():
             cfg=cfg,
         )
 
-        # Save best by macro F1 (within this run only ✅)
+        # Save best by macro F1
         improved_f1 = val_f1 > (best_val_f1 + min_delta)
         if improved_f1:
             best_val_f1 = val_f1
@@ -431,7 +477,7 @@ def main():
         else:
             bad_epochs += 1
 
-        # Save best by val loss (within this run only ✅)
+        # Save best by val loss
         if epoch_val_loss < best_val_loss:
             best_val_loss = epoch_val_loss
             save_checkpoint(
@@ -447,7 +493,7 @@ def main():
             )
             logger.info(f"✅ Saved best val-loss model for THIS RUN (val_loss={best_val_loss:.4f})")
 
-        # ✅ EARLY STOPPING (macro-F1)  -> you already commented it, keep it commented if you want
+        # Optional early stopping
         # if patience > 0 and bad_epochs >= patience:
         #     logger.info(
         #         f"🛑 Early stopping triggered: no macro-F1 improvement for {bad_epochs} epoch(s). "

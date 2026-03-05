@@ -1,5 +1,5 @@
 project_name: "lesion_aware_dr"
-run_name: "efficientnet_cb_focal"
+run_name: "efficientnet_logit_adjusted_ce_tau1.0"
 
 paths:
   data_dir: "data"
@@ -23,9 +23,8 @@ data:
   image_col: "image_id"
   label_col: "label"
 
-  # Use ONE balancing method at a time.
   # Here: sampler OFF, loss weights ON.
-  use_weighted_sampler: true
+  use_weighted_sampler: false
   sampler_mode: "inverse"
 
 training:
@@ -43,10 +42,15 @@ logging:
   wandb_project: "lesion_aware_dr"
   wandb_entity: null
 
+# loss:
+#   name: "cb_focal"
+#   beta: 0.999
+#   gamma: 2.0
+#   alpha_mode: "effective"
+#   reduction: "mean"
+#   use_class_weights: false
+
 loss:
-  name: "ce"
-  beta: 0.999
-  gamma: 2.5
-  alpha_mode: "effective"
-  reduction: "mean"
+  name: "logit_adjusted_ce"
+  tau: 1.0
   use_class_weights: false

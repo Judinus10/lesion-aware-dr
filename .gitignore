@@ -9,7 +9,7 @@ venv/
 .ipynb_checkpoints/
 
 # Data & models
-data/
+
 outputs/
 runs/
 checkpoints/

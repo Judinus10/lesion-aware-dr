@@ -41,9 +41,14 @@ class EyePacsDataset(Dataset):
         label = int(row[self.label_col])
 
         img_path = os.path.join(self.image_dir, fname)
-        # PIL -> RGB
-        img = Image.open(img_path).convert("RGB")
-        img = np.array(img)
+
+        try:
+            img = Image.open(img_path).convert("RGB")
+            img = np.array(img)
+        except Exception as e:
+            print(f"[WARN] Failed to read image: {img_path} | {e}")
+            # fallback black image
+            img = np.zeros((224, 224, 3), dtype=np.uint8)
 
         if self.transform is not None:
             img = self.transform(image=img)["image"]
@@ -52,7 +57,6 @@ class EyePacsDataset(Dataset):
 
 
 def build_transform(image_size: int):
-    # ImageNet normalization (standard for EfficientNet)
     return A.Compose([
         A.Resize(image_size, image_size),
         A.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225)),
@@ -68,7 +72,6 @@ def load_cfg(cfg_path: str) -> dict:
 def load_checkpoint(model: torch.nn.Module, ckpt_path: str, device: torch.device):
     ckpt = torch.load(ckpt_path, map_location=device)
 
-    # ✅ Your training saved weights under "model_state"
     if isinstance(ckpt, dict) and "model_state" in ckpt:
         state = ckpt["model_state"]
     elif isinstance(ckpt, dict) and "model_state_dict" in ckpt:
@@ -76,9 +79,8 @@ def load_checkpoint(model: torch.nn.Module, ckpt_path: str, device: torch.device
     elif isinstance(ckpt, dict) and "state_dict" in ckpt:
         state = ckpt["state_dict"]
     else:
-        state = ckpt  # assume plain state_dict
+        state = ckpt
 
-    # Strip "module." if needed
     new_state = {}
     for k, v in state.items():
         new_state[k.replace("module.", "")] = v
@@ -99,19 +101,40 @@ def plot_confusion_matrix(cm: np.ndarray, out_path: str, class_names=None):
     plt.xticks(tick_marks, class_names, rotation=45, ha="right")
     plt.yticks(tick_marks, class_names)
 
-    # write values
     thresh = cm.max() / 2.0 if cm.max() > 0 else 0.5
     for i in range(cm.shape[0]):
         for j in range(cm.shape[1]):
-            plt.text(j, i, format(cm[i, j], "d"),
-                     ha="center", va="center",
-                     color="white" if cm[i, j] > thresh else "black")
+            plt.text(
+                j,
+                i,
+                format(cm[i, j], "d"),
+                ha="center",
+                va="center",
+                color="white" if cm[i, j] > thresh else "black",
+            )
 
     plt.ylabel("True label")
     plt.xlabel("Predicted label")
     plt.tight_layout()
     plt.savefig(out_path, dpi=200)
     plt.close()
+
+
+def get_log_priors(train_csv: str, label_col: str, num_classes: int, device: torch.device):
+    train_df = pd.read_csv(train_csv)
+
+    class_counts = (
+        train_df[label_col]
+        .value_counts()
+        .sort_index()
+        .reindex(range(num_classes), fill_value=0)
+        .values.astype(np.float64)
+    )
+
+    class_priors = class_counts / class_counts.sum()
+    log_priors = np.log(class_priors + 1e-12)
+
+    return torch.tensor(log_priors, dtype=torch.float32, device=device), class_counts, class_priors
 
 
 def main():
@@ -133,35 +156,56 @@ def main():
     image_col = cfg["data"]["image_col"]
     label_col = cfg["data"]["label_col"]
 
+    train_csv = cfg["data"]["train_csv"]
+    val_csv = cfg["data"]["val_csv"]
+
     outputs_dir = cfg["paths"]["outputs_dir"]
-    eval_dir = Path(outputs_dir) / "eval"
-    eval_dir.mkdir(parents=True, exist_ok=True)
 
-    # pick csv
-    csv_path = cfg["data"]["val_csv"] if args.split == "val" else cfg["data"]["train_csv"]
+    loss_name = cfg.get("loss", {}).get("name", "ce")
+    tau = float(cfg.get("loss", {}).get("tau", 1.0))
 
-    # default checkpoint if not provided
+    csv_path = val_csv if args.split == "val" else train_csv
+
     if args.ckpt_path is None:
         ckpt_dir = cfg["paths"]["checkpoints_dir"]
-        args.ckpt_path = str(Path(ckpt_dir) / "best_model.pt")
+        args.ckpt_path = str(Path(ckpt_dir) / "best_macro_f1_model.pt")
+
+    ckpt_name = Path(args.ckpt_path).stem
+    eval_dir = Path(outputs_dir) / "eval" / ckpt_name
+    eval_dir.mkdir(parents=True, exist_ok=True)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"[EVAL] device: {device}")
     print(f"[EVAL] csv: {csv_path}")
     print(f"[EVAL] image_dir: {image_dir}")
     print(f"[EVAL] ckpt: {args.ckpt_path}")
+    print(f"[EVAL] loss_name: {loss_name}")
+    print(f"[EVAL] tau: {tau}")
 
-    # dataset/loader
+    log_priors, class_counts, class_priors = get_log_priors(
+        train_csv=train_csv,
+        label_col=label_col,
+        num_classes=num_classes,
+        device=device,
+    )
+
+    print(f"[EVAL] class_counts: {class_counts.tolist()}")
+    print(f"[EVAL] class_priors: {[round(float(x), 6) for x in class_priors]}")
+
     tfm = build_transform(image_size)
     ds = EyePacsDataset(csv_path, image_dir, image_col, label_col, transform=tfm)
-    dl = DataLoader(ds, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers, pin_memory=True)
+    dl = DataLoader(
+        ds,
+        batch_size=args.batch_size,
+        shuffle=False,
+        num_workers=args.num_workers,
+        pin_memory=True,
+    )
 
-    # model
     model = timm.create_model(backbone, pretrained=False, num_classes=num_classes)
     model.to(device)
-    model.eval()
-
     load_checkpoint(model, args.ckpt_path, device)
+    model.eval()
 
     y_true = []
     y_pred = []
@@ -173,15 +217,19 @@ def main():
             x = x.to(device, non_blocking=True)
             y = y.to(device, non_blocking=True)
 
-            # AMP only if cuda
             if device.type == "cuda":
                 with torch.autocast(device_type="cuda", dtype=torch.float16):
                     logits = model(x)
             else:
                 logits = model(x)
 
-            probs = torch.softmax(logits, dim=1)
-            pred = torch.argmax(probs, dim=1)
+            if loss_name == "logit_adjusted_ce":
+                adjusted_logits = logits + tau * log_priors.unsqueeze(0)
+                probs = torch.softmax(adjusted_logits, dim=1)
+                pred = torch.argmax(adjusted_logits, dim=1)
+            else:
+                probs = torch.softmax(logits, dim=1)
+                pred = torch.argmax(logits, dim=1)
 
             y_true.extend(y.cpu().numpy().tolist())
             y_pred.extend(pred.cpu().numpy().tolist())
@@ -199,7 +247,6 @@ def main():
     print("\nClassification report:\n")
     print(report)
 
-    # save outputs
     (eval_dir / "classification_report.txt").write_text(report)
 
     metrics = {
@@ -210,6 +257,10 @@ def main():
         "csv_path": csv_path,
         "image_dir": image_dir,
         "backbone": backbone,
+        "loss_name": loss_name,
+        "tau": tau,
+        "class_counts": class_counts.tolist(),
+        "class_priors": class_priors.tolist(),
     }
     (eval_dir / "metrics.json").write_text(json.dumps(metrics, indent=2))
 
@@ -220,10 +271,11 @@ def main():
         "y_true": y_true,
         "y_pred": y_pred,
     })
-    # add probs columns
+
     probs_np = np.array(probs_all)
     for c in range(probs_np.shape[1]):
         pred_df[f"prob_{c}"] = probs_np[:, c]
+
     pred_df.to_csv(eval_dir / "predictions.csv", index=False)
 
     print(f"\nSaved to: {eval_dir}")

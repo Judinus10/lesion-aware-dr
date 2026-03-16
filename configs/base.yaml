@@ -2,11 +2,11 @@ project_name: "lesion_aware_dr"
 run_name: "efficientnet_logit_adjusted_ce_tau1.0"
 
 paths:
-  data_dir: "data"
-  raw_dir: "data/raw"
-  processed_dir: "data/processed"
-  outputs_dir: "outputs"
-  checkpoints_dir: "outputs/checkpoints"
+  data_dir: "/kaggle/working"
+  raw_dir: "/kaggle/working"
+  processed_dir: "/kaggle/working/multidata_splits"
+  outputs_dir: "/kaggle/working/outputs"
+  checkpoints_dir: "/kaggle/working/outputs/checkpoints"
 
 model:
   backbone: "efficientnet_b0"
@@ -17,15 +17,60 @@ data:
   use_dummy: false
   image_size: 224
 
-  train_csv: "/content/drive/MyDrive/Lesion_aware_DR/eyepacs/train.csv"
-  val_csv:   "/content/drive/MyDrive/Lesion_aware_DR/eyepacs/val_clean.csv"
-  image_dir: "/content/eyepacs_images/Images"
-  image_col: "image_id"
+  # --------------------------------------------------
+  # Current training inputs (used by datamodule/train)
+  # --------------------------------------------------
+  train_csv: "/kaggle/working/multidata_splits/combined_train.csv"
+  val_csv: "/kaggle/working/multidata_splits/combined_val.csv"
+
+  # For backward compatibility with old loader
+  image_dir: ""
+  image_col: "image_path"
   label_col: "label"
 
-  # Here: sampler OFF, loss weights ON.
+  # Optional extra column
+  dataset_col: "dataset"
+
+  # Sampler
   use_weighted_sampler: false
   sampler_mode: "inverse"
+
+  # --------------------------------------------------
+  # Raw dataset sources for split-building script
+  # --------------------------------------------------
+  sources:
+    eyepacs:
+      labels_csv: "/kaggle/input/datasets/mohlamin/resized-eyepacs-diabetic-retinopathy-dataset/original_train_labels.csv"
+      images_dir: "/kaggle/input/datasets/mohlamin/resized-eyepacs-diabetic-retinopathy-dataset/Images"
+      image_ext: ".png"
+      image_col_raw: "image"
+      label_col_raw: "level"
+
+    aptos:
+      root_dir: "/kaggle/input/datasets/mariaherrerot/aptos2019"
+      train_csv: "/kaggle/input/datasets/mariaherrerot/aptos2019/train_1.csv"
+      val_csv: "/kaggle/input/datasets/mariaherrerot/aptos2019/valid.csv"
+      train_images_dir: "/kaggle/input/datasets/mariaherrerot/aptos2019/train_images"
+      val_images_dir: "/kaggle/input/datasets/mariaherrerot/aptos2019/val_images"
+      image_ext: ".png"
+      image_col_raw: "id_code"
+      label_col_raw: "diagnosis"
+
+  # --------------------------------------------------
+  # Split-building options
+  # --------------------------------------------------
+  split:
+    random_state: 42
+    eyepacs_val_size: 0.2
+    verify_files: true
+
+    outputs:
+      eyepacs_train_csv: "/kaggle/working/multidata_splits/eyepacs_train.csv"
+      eyepacs_val_csv: "/kaggle/working/multidata_splits/eyepacs_val.csv"
+      aptos_train_csv: "/kaggle/working/multidata_splits/aptos_train.csv"
+      aptos_val_csv: "/kaggle/working/multidata_splits/aptos_val.csv"
+      combined_train_csv: "/kaggle/working/multidata_splits/combined_train.csv"
+      combined_val_csv: "/kaggle/working/multidata_splits/combined_val.csv"
 
 training:
   seed: 42
@@ -41,14 +86,6 @@ logging:
   use_wandb: false
   wandb_project: "lesion_aware_dr"
   wandb_entity: null
-
-# loss:
-#   name: "cb_focal"
-#   beta: 0.999
-#   gamma: 2.0
-#   alpha_mode: "effective"
-#   reduction: "mean"
-#   use_class_weights: false
 
 loss:
   name: "logit_adjusted_ce"

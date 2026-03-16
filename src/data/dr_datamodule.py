@@ -108,7 +108,7 @@ class DRDataset(Dataset):
                         translate_percent=(0.0, 0.05),
                         rotate=(-15, 15),
                         p=0.5,
-                        mode=cv2.BORDER_REFLECT_101,
+                        border_mode=cv2.BORDER_REFLECT_101,
                     ),
                     A.Normalize(mean=imagenet_mean, std=imagenet_std),
                     ToTensorV2(),

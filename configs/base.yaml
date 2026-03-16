@@ -1,5 +1,5 @@
 project_name: "lesion_aware_dr"
-run_name: "efficientnet_logit_adjusted_ce_tau1.0"
+run_name: "efficientnet_cb_focal_multidata_v1"
 
 paths:
   data_dir: "/kaggle/working"
@@ -86,6 +86,9 @@ logging:
   wandb_entity: null
 
 loss:
-  name: "logit_adjusted_ce"
-  tau: 1.0
+  name: "cb_focal"
+  beta: 0.999
+  gamma: 2.0
+  alpha_mode: "effective"
+  reduction: "mean"
   use_class_weights: false

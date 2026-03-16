@@ -23,12 +23,10 @@ data:
   train_csv: "/kaggle/working/multidata_splits/combined_train.csv"
   val_csv: "/kaggle/working/multidata_splits/combined_val.csv"
 
-  # For backward compatibility with old loader
+  # Loader config
   image_dir: ""
   image_col: "image_path"
   label_col: "label"
-
-  # Optional extra column
   dataset_col: "dataset"
 
   # Sampler

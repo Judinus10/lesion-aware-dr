@@ -8,10 +8,6 @@ import yaml
 from sklearn.model_selection import train_test_split
 
 
-# =========================================================
-# CONFIG LOADING
-# =========================================================
-
 def load_config(cfg_path: str) -> dict:
     cfg_path = Path(cfg_path)
     if not cfg_path.exists():
@@ -20,10 +16,6 @@ def load_config(cfg_path: str) -> dict:
     with open(cfg_path, "r", encoding="utf-8") as f:
         return yaml.safe_load(f)
 
-
-# =========================================================
-# HELPERS
-# =========================================================
 
 def ensure_parent_dir(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -55,10 +47,6 @@ def print_distribution(df: pd.DataFrame, title: str) -> None:
         print("\nDataset distribution:")
         print(df["dataset"].value_counts())
 
-
-# =========================================================
-# STANDARDIZATION
-# =========================================================
 
 def build_eyepacs_df(cfg: dict) -> pd.DataFrame:
     eyepacs_cfg = cfg["data"]["sources"]["eyepacs"]
@@ -134,10 +122,6 @@ def build_aptos_df(csv_path: Path, images_dir: Path, cfg: dict, split_name: str)
     return df
 
 
-# =========================================================
-# SPLIT LOGIC
-# =========================================================
-
 def split_eyepacs(df: pd.DataFrame, cfg: dict) -> Tuple[pd.DataFrame, pd.DataFrame]:
     split_cfg = cfg["data"]["split"]
     val_size = float(split_cfg.get("eyepacs_val_size", 0.2))
@@ -152,10 +136,6 @@ def split_eyepacs(df: pd.DataFrame, cfg: dict) -> Tuple[pd.DataFrame, pd.DataFra
 
     return train_df.reset_index(drop=True), val_df.reset_index(drop=True)
 
-
-# =========================================================
-# MAIN
-# =========================================================
 
 def main(cfg_path: str = "configs/base.yaml") -> None:
     cfg = load_config(cfg_path)
@@ -177,15 +157,9 @@ def main(cfg_path: str = "configs/base.yaml") -> None:
 
     print("===== Building multi-dataset splits =====\n")
 
-    # --------------------------------------------------
-    # EyePACS
-    # --------------------------------------------------
     eyepacs_df = build_eyepacs_df(cfg)
     eyepacs_train_df, eyepacs_val_df = split_eyepacs(eyepacs_df, cfg)
 
-    # --------------------------------------------------
-    # APTOS
-    # --------------------------------------------------
     aptos_train_df = build_aptos_df(
         csv_path=aptos_train_csv,
         images_dir=aptos_train_images_dir,
@@ -200,9 +174,6 @@ def main(cfg_path: str = "configs/base.yaml") -> None:
         split_name="val",
     ).reset_index(drop=True)
 
-    # --------------------------------------------------
-    # Combined
-    # --------------------------------------------------
     random_state = int(cfg["data"]["split"].get("random_state", 42))
 
     combined_train_df = pd.concat(
@@ -215,9 +186,6 @@ def main(cfg_path: str = "configs/base.yaml") -> None:
         axis=0
     ).sample(frac=1, random_state=random_state).reset_index(drop=True)
 
-    # --------------------------------------------------
-    # Save
-    # --------------------------------------------------
     save_df(eyepacs_train_df, out_eyepacs_train, "EyePACS train")
     save_df(eyepacs_val_df, out_eyepacs_val, "EyePACS val")
     save_df(aptos_train_df, out_aptos_train, "APTOS train")
@@ -225,9 +193,6 @@ def main(cfg_path: str = "configs/base.yaml") -> None:
     save_df(combined_train_df, out_combined_train, "Combined train")
     save_df(combined_val_df, out_combined_val, "Combined val")
 
-    # --------------------------------------------------
-    # Final report
-    # --------------------------------------------------
     print("\n===== FINAL SUMMARY =====")
     print(f"EyePACS train:   {eyepacs_train_df.shape}")
     print(f"EyePACS val:     {eyepacs_val_df.shape}")

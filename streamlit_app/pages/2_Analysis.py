@@ -43,7 +43,7 @@ filename_hint = st.session_state.get("last_uploaded_name", "fundus")
 default_layer = st.session_state.get("preferred_layer", None)
 
 # ---------------------------
-# Controls state (so we can compute CAM BEFORE rendering top buttons)
+# Controls state
 # ---------------------------
 if "analysis_target_class" not in st.session_state:
     st.session_state.analysis_target_class = pred_idx
@@ -51,11 +51,15 @@ if "analysis_alpha" not in st.session_state:
     st.session_state.analysis_alpha = 0.45
 if "analysis_target_layer" not in st.session_state:
     st.session_state.analysis_target_layer = "(auto)"
+if "analysis_cam_method" not in st.session_state:
+    st.session_state.analysis_cam_method = "GradCAM++"
 
-# Read controls from session (these are used for CAM compute)
+# Read controls from session
 target_class = int(st.session_state.analysis_target_class)
 alpha = float(st.session_state.analysis_alpha)
 picked_layer = st.session_state.analysis_target_layer
+cam_method_ui = st.session_state.analysis_cam_method
+cam_method = "gradcampp" if cam_method_ui == "GradCAM++" else "scorecam"
 
 # Build preferred layer name
 convs = utils.list_conv2d_layers(model)
@@ -63,14 +67,20 @@ layer_names = [n for n, _ in convs] if convs else []
 preferred = None if picked_layer == "(auto)" else picked_layer
 
 # ---------------------------
-# Compute CAM EARLY (so Save/Download can be at the top)
+# Compute CAM early
 # ---------------------------
 with st.spinner("Preparing analysis…"):
     layer_name, layer_module = utils.choose_target_layer(model, preferred_name=preferred)
-    cam_mask = utils.run_gradcam_pp(model, input_tensor, int(target_class), layer_module)
+    cam_mask = utils.run_cam(
+        model=model,
+        input_tensor=input_tensor,
+        target_class=int(target_class),
+        target_layer_module=layer_module,
+        method=cam_method,
+    )
     overlay_rgb, heatmap_rgb = utils.overlay_heatmap(raw_rgb, cam_mask, alpha=float(alpha))
 
-# Prepare export JSON EARLY
+# Prepare export JSON early
 export = {
     "filename_hint": filename_hint,
     "pred_idx": pred_idx,
@@ -78,11 +88,12 @@ export = {
     "probs": [float(x) for x in probs.tolist()],
     "target_class": int(target_class),
     "target_layer": layer_name,
+    "cam_method": cam_method_ui,
     "alpha": float(alpha),
 }
 
 # ---------------------------
-# TOP BAR: Back (left) + Save/Download (right) SAME LINE ✅
+# TOP BAR
 # ---------------------------
 top_left, top_right = st.columns([3, 1], gap="large")
 
@@ -104,6 +115,7 @@ with top_right:
                 probs=probs,
                 target_class=int(target_class),
                 target_layer_name=layer_name,
+                cam_method=cam_method_ui,
             )
             st.success(f"Saved ✅ {record['case_id']}")
 
@@ -157,8 +169,14 @@ left, right = st.columns([2.2, 1.0], gap="large")
 with right:
     st.subheader("Explainability Controls")
 
-    # These widgets update session_state, and we force rerun so CAM updates
-    new_target = st.selectbox(
+    st.selectbox(
+        "Explainability method",
+        options=["GradCAM++", "ScoreCAM"],
+        key="analysis_cam_method",
+        help="GradCAM++ is the baseline. ScoreCAM is slower but useful for comparison.",
+    )
+
+    st.selectbox(
         "Generate heatmap for class",
         options=list(range(utils.NUM_CLASSES)),
         index=int(target_class),
@@ -166,28 +184,26 @@ with right:
         key="analysis_target_class",
     )
 
-    new_alpha = st.slider(
+    st.slider(
         "Overlay strength",
         0.10, 0.80, float(alpha), 0.05,
         key="analysis_alpha",
     )
 
     if layer_names:
+        default_index = 0
+        if picked_layer != "(auto)" and picked_layer in layer_names:
+            default_index = layer_names.index(picked_layer) + 1
+
         st.selectbox(
             "Target layer",
             options=["(auto)"] + layer_names,
-            index=0 if default_layer is None else (
-                layer_names.index(default_layer) + 1 if default_layer in layer_names else 0
-            ),
+            index=default_index,
             key="analysis_target_layer",
         )
     else:
         st.session_state.analysis_target_layer = "(auto)"
         st.caption("No Conv2D layers detected.")
-
-    # Rerun if changed (to recompute CAM)
-    if (int(new_target) != int(target_class)) or (float(new_alpha) != float(alpha)):
-        st.rerun()
 
     st.markdown("---")
     st.subheader("Saved Cases")
@@ -196,26 +212,27 @@ with right:
         st.write(f"Recent saved: **{len(cases)}**")
         with st.expander("Show recent cases"):
             for c in cases[:10]:
-                st.write(f"- {c['timestamp']} — **{c['pred_name']}** — {c['filename_hint']}")
+                cam_label = c.get("cam_method", "GradCAM++")
+                st.write(f"- {c['timestamp']} — **{c['pred_name']}** — {cam_label} — {c['filename_hint']}")
     else:
         st.caption("No saved cases yet.")
 
 with left:
     st.subheader("Why did the model predict this?")
-    st.caption("Grad-CAM++ highlights regions contributing to the selected class score.")
+    st.caption(f"{cam_method_ui} highlights regions contributing to the selected class score.")
 
     c1, c2, c3 = st.columns(3, gap="medium")
     with c1:
         st.markdown("### Input")
         st.image(raw_rgb, use_container_width=True)
     with c2:
-        st.markdown("### Heatmap")
+        st.markdown(f"### {cam_method_ui} Heatmap")
         st.image(heatmap_rgb, use_container_width=True)
     with c3:
-        st.markdown("### Overlay")
+        st.markdown(f"### {cam_method_ui} Overlay")
         st.image(overlay_rgb, use_container_width=True)
 
 st.divider()
 
-# Bottom highlighted reminder (like before)
+# Bottom reminder
 st.info("⚠ Research demo only — not medical advice. Heatmaps show model attention, not clinical truth.")

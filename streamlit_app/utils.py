@@ -15,7 +15,7 @@ import timm
 import albumentations as A
 from albumentations.pytorch import ToTensorV2
 
-from pytorch_grad_cam import GradCAMPlusPlus
+from pytorch_grad_cam import GradCAMPlusPlus, ScoreCAM
 from pytorch_grad_cam.utils.model_targets import ClassifierOutputTarget
 
 
@@ -73,22 +73,25 @@ def pil_to_rgb_np(pil_img: Image.Image) -> np.ndarray:
 def preprocess(pil_img: Image.Image):
     rgb = pil_to_rgb_np(pil_img)
     aug = get_transform()(image=rgb)
-    x = aug["image"].unsqueeze(0)  # [1,3,H,W]
+    x = aug["image"].unsqueeze(0)  # [1, 3, H, W]
     return x, rgb
 
 
 def _extract_state_dict(ckpt):
-    # Common formats
     if isinstance(ckpt, dict):
         if "state_dict" in ckpt:
             return ckpt["state_dict"]
         if "model" in ckpt:
             return ckpt["model"]
         if "model_state" in ckpt:
-            return ckpt["model_state"]   # ✅ THIS IS YOUR CASE
+            return ckpt["model_state"]
         if "model_state_dict" in ckpt:
             return ckpt["model_state_dict"]
-    raise ValueError(f"Checkpoint format not recognized. Keys: {list(ckpt.keys()) if isinstance(ckpt, dict) else type(ckpt)}")
+
+    raise ValueError(
+        f"Checkpoint format not recognized. Keys: "
+        f"{list(ckpt.keys()) if isinstance(ckpt, dict) else type(ckpt)}"
+    )
 
 
 def _clean_state_dict(state):
@@ -96,9 +99,7 @@ def _clean_state_dict(state):
 
 
 def debug_state_dict_summary(model: torch.nn.Module, state: dict):
-    """Return (missing, unexpected) keys and a quick head-check."""
     missing, unexpected = model.load_state_dict(state, strict=False)
-    # roll back not needed because we create model fresh anyway
     return missing, unexpected
 
 
@@ -113,35 +114,24 @@ def load_model_cached():
     state = _extract_state_dict(ckpt)
     state = _clean_state_dict(state)
 
-    # ---- KEY REMAP (common training wrappers) ----
     remapped = {}
 
     for k, v in state.items():
         nk = k
 
-        # Common wrappers: "model.", "net.", "module."
         for prefix in ["model.", "net.", "module."]:
             if nk.startswith(prefix):
                 nk = nk[len(prefix):]
 
-        # Sometimes timm efficientnet uses "conv_head" + "classifier"
-        # but training code may have saved as "head.conv_head" or "head.classifier"
         nk = nk.replace("head.conv_head.", "conv_head.")
         nk = nk.replace("head.classifier.", "classifier.")
-
-        # Sometimes classifier is called "fc"
         nk = nk.replace("fc.", "classifier.")
-
-        # Sometimes the head is a sequential: "classifier.1.weight" etc.
-        # If you see this pattern, we can map ".1." -> "." (often correct)
         nk = nk.replace("classifier.1.", "classifier.")
 
         remapped[nk] = v
 
-    # Try load
     missing, unexpected = model.load_state_dict(remapped, strict=False)
-   
-    # If still missing head keys, show a clear error
+
     head_missing = [k for k in missing if ("conv_head" in k or "classifier" in k or "fc" in k)]
     if head_missing:
         print("=== CHECKPOINT LOAD DEBUG ===")
@@ -161,12 +151,14 @@ def load_model_cached():
 
     model.eval().to(device)
     return model, device
+
+
 def predict(model, device, pil_img: Image.Image):
     x, raw_rgb = preprocess(pil_img)
     x = x.to(device)
 
     with torch.no_grad():
-        logits = model(x)  # [1, num_classes]
+        logits = model(x)
         probs = F.softmax(logits, dim=1).squeeze(0).detach().cpu().numpy()
         pred_idx = int(np.argmax(probs))
 
@@ -181,7 +173,7 @@ def predict(model, device, pil_img: Image.Image):
 
 
 # -------------------------
-# GradCAM++ helpers
+# CAM helpers
 # -------------------------
 def list_conv2d_layers(model: torch.nn.Module):
     layers = []
@@ -208,8 +200,15 @@ def choose_target_layer(model: torch.nn.Module, preferred_name: str | None = Non
     return convs[-1][0], convs[-1][1]
 
 
-def overlay_heatmap(rgb_img, cam_mask, alpha=0.45):
+def overlay_heatmap(rgb_img: np.ndarray, cam_mask: np.ndarray, alpha: float = 0.45):
     cam_mask = np.clip(cam_mask, 0.0, 1.0)
+
+    if cam_mask.shape[:2] != rgb_img.shape[:2]:
+        cam_mask = cv2.resize(
+            cam_mask,
+            (rgb_img.shape[1], rgb_img.shape[0]),
+            interpolation=cv2.INTER_LINEAR,
+        )
 
     heat = (cam_mask * 255).astype(np.uint8)
     heatmap = cv2.applyColorMap(heat, cv2.COLORMAP_JET)
@@ -219,11 +218,36 @@ def overlay_heatmap(rgb_img, cam_mask, alpha=0.45):
     return overlay, heatmap
 
 
-def run_gradcam_pp(model, input_tensor, target_class: int, target_layer_module):
-    cam = GradCAMPlusPlus(model=model, target_layers=[target_layer_module])
+def run_cam(
+    model,
+    input_tensor,
+    target_class: int,
+    target_layer_module,
+    method: str = "gradcampp",
+):
+    method = method.lower().strip()
+
+    if method == "gradcampp":
+        cam_extractor = GradCAMPlusPlus(model=model, target_layers=[target_layer_module])
+    elif method == "scorecam":
+        cam_extractor = ScoreCAM(model=model, target_layers=[target_layer_module])
+    else:
+        raise ValueError(f"Unsupported CAM method: {method}")
+
     targets = [ClassifierOutputTarget(int(target_class))]
-    grayscale_cam = cam(input_tensor=input_tensor, targets=targets)[0]  # [H,W]
+    grayscale_cam = cam_extractor(input_tensor=input_tensor, targets=targets)[0]
     return grayscale_cam
+
+
+# Backward-compatible wrapper so old code won’t break
+def run_gradcam_pp(model, input_tensor, target_class: int, target_layer_module):
+    return run_cam(
+        model=model,
+        input_tensor=input_tensor,
+        target_class=target_class,
+        target_layer_module=target_layer_module,
+        method="gradcampp",
+    )
 
 
 # -------------------------
@@ -238,6 +262,7 @@ def save_case(
     probs: np.ndarray,
     target_class: int,
     target_layer_name: str,
+    cam_method: str = "GradCAM++",
 ):
     ensure_dirs()
 
@@ -267,6 +292,7 @@ def save_case(
         "probs": [float(x) for x in probs.tolist()],
         "target_class": int(target_class),
         "target_layer": target_layer_name,
+        "cam_method": cam_method,
         "paths": {
             "input": img_path,
             "heatmap": cam_path,
@@ -282,6 +308,7 @@ def save_case(
 
 def load_recent_cases(limit=30):
     ensure_dirs()
+
     if not os.path.exists(CASES_FILE):
         return []
 
@@ -293,6 +320,7 @@ def load_recent_cases(limit=30):
                 continue
             try:
                 rows.append(json.loads(line))
-            except:
+            except Exception:
                 pass
+
     return rows[-limit:][::-1]

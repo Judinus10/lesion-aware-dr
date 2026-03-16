@@ -21,15 +21,13 @@ from sklearn.metrics import accuracy_score, f1_score, classification_report, con
 import matplotlib.pyplot as plt
 
 
-# -----------------------------
-# Dataset
-# -----------------------------
 class EyePacsDataset(Dataset):
-    def __init__(self, csv_path: str, image_dir: str, image_col: str, label_col: str, transform=None):
+    def __init__(self, csv_path: str, image_dir: str, image_col: str, label_col: str, image_size: int, transform=None):
         self.df = pd.read_csv(csv_path)
         self.image_dir = image_dir
         self.image_col = image_col
         self.label_col = label_col
+        self.image_size = int(image_size)
         self.transform = transform
 
     def __len__(self):
@@ -47,8 +45,7 @@ class EyePacsDataset(Dataset):
             img = np.array(img)
         except Exception as e:
             print(f"[WARN] Failed to read image: {img_path} | {e}")
-            # fallback black image
-            img = np.zeros((224, 224, 3), dtype=np.uint8)
+            img = np.zeros((self.image_size, self.image_size, 3), dtype=np.uint8)
 
         if self.transform is not None:
             img = self.transform(image=img)["image"]
@@ -120,7 +117,7 @@ def plot_confusion_matrix(cm: np.ndarray, out_path: str, class_names=None):
     plt.close()
 
 
-def get_log_priors(train_csv: str, label_col: str, num_classes: int, device: torch.device):
+def get_train_stats(train_csv: str, label_col: str, num_classes: int, device: torch.device):
     train_df = pd.read_csv(train_csv)
 
     class_counts = (
@@ -134,7 +131,10 @@ def get_log_priors(train_csv: str, label_col: str, num_classes: int, device: tor
     class_priors = class_counts / class_counts.sum()
     log_priors = np.log(class_priors + 1e-12)
 
-    return torch.tensor(log_priors, dtype=torch.float32, device=device), class_counts, class_priors
+    log_priors_t = torch.tensor(log_priors, dtype=torch.float32, device=device)
+    class_counts_t = torch.tensor(class_counts, dtype=torch.float32, device=device)
+
+    return log_priors_t, class_counts_t, class_counts, class_priors
 
 
 def main():
@@ -180,9 +180,10 @@ def main():
     print(f"[EVAL] image_dir: {image_dir}")
     print(f"[EVAL] ckpt: {args.ckpt_path}")
     print(f"[EVAL] loss_name: {loss_name}")
-    print(f"[EVAL] tau: {tau}")
+    if loss_name == "logit_adjusted_ce":
+        print(f"[EVAL] tau: {tau}")
 
-    log_priors, class_counts, class_priors = get_log_priors(
+    log_priors_t, class_counts_t, class_counts, class_priors = get_train_stats(
         train_csv=train_csv,
         label_col=label_col,
         num_classes=num_classes,
@@ -193,7 +194,14 @@ def main():
     print(f"[EVAL] class_priors: {[round(float(x), 6) for x in class_priors]}")
 
     tfm = build_transform(image_size)
-    ds = EyePacsDataset(csv_path, image_dir, image_col, label_col, transform=tfm)
+    ds = EyePacsDataset(
+        csv_path=csv_path,
+        image_dir=image_dir,
+        image_col=image_col,
+        label_col=label_col,
+        image_size=image_size,
+        transform=tfm,
+    )
     dl = DataLoader(
         ds,
         batch_size=args.batch_size,
@@ -224,12 +232,14 @@ def main():
                 logits = model(x)
 
             if loss_name == "logit_adjusted_ce":
-                adjusted_logits = logits + tau * log_priors.unsqueeze(0)
-                probs = torch.softmax(adjusted_logits, dim=1)
-                pred = torch.argmax(adjusted_logits, dim=1)
+                adjusted_logits = logits + tau * log_priors_t.unsqueeze(0)
+            elif loss_name == "balanced_softmax":
+                adjusted_logits = logits + torch.log(class_counts_t.unsqueeze(0) + 1e-12)
             else:
-                probs = torch.softmax(logits, dim=1)
-                pred = torch.argmax(logits, dim=1)
+                adjusted_logits = logits
+
+            probs = torch.softmax(adjusted_logits, dim=1)
+            pred = torch.argmax(adjusted_logits, dim=1)
 
             y_true.extend(y.cpu().numpy().tolist())
             y_pred.extend(pred.cpu().numpy().tolist())
@@ -258,7 +268,7 @@ def main():
         "image_dir": image_dir,
         "backbone": backbone,
         "loss_name": loss_name,
-        "tau": tau,
+        "tau": tau if loss_name == "logit_adjusted_ce" else None,
         "class_counts": class_counts.tolist(),
         "class_priors": class_priors.tolist(),
     }

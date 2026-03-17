@@ -1,377 +1,323 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Tuple
+from typing import Dict, Any, Optional
+import random
 
+import numpy as np
 import pandas as pd
-import yaml
-from sklearn.model_selection import train_test_split
+import cv2
+import torch
+from torch.utils.data import Dataset, DataLoader, WeightedRandomSampler
 
-
-def load_config(cfg_path: str) -> dict:
-    cfg_path = Path(cfg_path)
-    if not cfg_path.exists():
-        raise FileNotFoundError(f"Config file not found: {cfg_path}")
-
-    with open(cfg_path, "r", encoding="utf-8") as f:
-        return yaml.safe_load(f)
-
-
-def ensure_parent_dir(path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-
-
-def verify_files_exist(df: pd.DataFrame, image_path_col: str = "image_path", sample_n: int = 5) -> None:
-    missing = df[~df[image_path_col].apply(lambda x: Path(x).exists())]
-
-    if len(missing) > 0:
-        print(f"❌ Missing image files detected: {len(missing)}")
-        print(missing.head(sample_n))
-        raise RuntimeError("Some image files listed in CSV do not exist.")
-
-    dataset_name = df["dataset"].iloc[0] if "dataset" in df.columns and len(df) > 0 else "unknown"
-    print(f"✅ All image files found for dataset={dataset_name}, rows={len(df)}")
-
-
-def save_df(df: pd.DataFrame, out_path: Path, name: str) -> None:
-    ensure_parent_dir(out_path)
-    df.to_csv(out_path, index=False)
-    print(f"✅ Saved {name}: {out_path} | shape={df.shape}")
-
-
-def print_distribution(df: pd.DataFrame, title: str) -> None:
-    print(f"\n{title}")
-    print("Label distribution:")
-    print(df["label"].value_counts().sort_index())
-
-    if "dataset" in df.columns:
-        print("\nDataset distribution:")
-        print(df["dataset"].value_counts())
+import albumentations as A
+from albumentations.pytorch import ToTensorV2
 
 
 # =========================================================
-# EyePACS
+# Dummy dataset for quick testing
 # =========================================================
-def build_eyepacs_df(cfg: dict) -> pd.DataFrame:
-    eyepacs_cfg = cfg["data"]["sources"]["eyepacs"]
 
-    labels_csv = Path(eyepacs_cfg["labels_csv"])
-    images_dir = Path(eyepacs_cfg["images_dir"])
-    image_ext = str(eyepacs_cfg.get("image_ext", ".png"))
-    image_col_raw = str(eyepacs_cfg["image_col_raw"])
-    label_col_raw = str(eyepacs_cfg["label_col_raw"])
+class DummyDRDataset(Dataset):
+    """
+    Returns random images & labels.
+    Use only when cfg.data.use_dummy = true.
+    """
+    def __init__(self, num_samples: int, num_classes: int, image_size: int):
+        self.num_samples = int(num_samples)
+        self.num_classes = int(num_classes)
+        self.image_size = int(image_size)
 
-    df = pd.read_csv(labels_csv)
-    print("EyePACS original columns:", list(df.columns))
+    def __len__(self) -> int:
+        return self.num_samples
 
-    required_cols = {image_col_raw, label_col_raw}
-    if not required_cols.issubset(df.columns):
-        raise ValueError(
-            f"EyePACS CSV missing required columns. "
-            f"Required={required_cols}, found={list(df.columns)}"
+    def __getitem__(self, idx: int) -> Dict[str, Any]:
+        image = torch.rand(3, self.image_size, self.image_size)
+        label = torch.randint(0, self.num_classes, (1,)).item()
+        return {
+            "image": image,
+            "label": torch.tensor(label, dtype=torch.long),
+        }
+
+
+# =========================================================
+# Real DR dataset
+# =========================================================
+
+class DRDataset(Dataset):
+    """
+    Generic DR dataset reading from CSV.
+
+    Supported CSV modes:
+
+    1) Old mode:
+       image_id,label
+       10_left.png,0
+
+       -> requires images_dir + image_col=image_id
+
+    2) New mode:
+       image_path,label,dataset
+       /full/path/to/file.png,0,eyepacs
+
+       -> set image_col=image_path
+       -> images_dir can be empty
+
+    Robust to corrupted images:
+    retries a few times and then errors clearly.
+    """
+
+    def __init__(
+        self,
+        csv_path: str,
+        images_dir: str = "",
+        image_col: str = "image_path",
+        label_col: str = "label",
+        dataset_col: Optional[str] = None,
+        image_size: int = 224,
+        augment: bool = False,
+        max_decode_retries: int = 20,
+        log_bad_every: int = 50,
+    ):
+        self.csv_path = str(csv_path)
+        self.df = pd.read_csv(csv_path).reset_index(drop=True)
+
+        self.images_dir = Path(images_dir) if str(images_dir).strip() else None
+        self.image_col = str(image_col)
+        self.label_col = str(label_col)
+        self.dataset_col = str(dataset_col) if dataset_col else None
+        self.image_size = int(image_size)
+
+        self.max_decode_retries = int(max_decode_retries)
+        self.log_bad_every = int(log_bad_every)
+        self.bad_count = 0
+
+        self._validate_columns()
+
+        imagenet_mean = (0.485, 0.456, 0.406)
+        imagenet_std = (0.229, 0.224, 0.225)
+
+        if augment:
+            self.transform = A.Compose(
+                [
+                    A.Resize(image_size, image_size),
+                    A.HorizontalFlip(p=0.5),
+                    A.RandomBrightnessContrast(p=0.4),
+                    A.Affine(
+                        scale=(0.95, 1.05),
+                        translate_percent=(0.0, 0.05),
+                        rotate=(-15, 15),
+                        p=0.5,
+                        border_mode=cv2.BORDER_REFLECT_101,
+                    ),
+                    A.Normalize(mean=imagenet_mean, std=imagenet_std),
+                    ToTensorV2(),
+                ]
+            )
+        else:
+            self.transform = A.Compose(
+                [
+                    A.Resize(image_size, image_size),
+                    A.Normalize(mean=imagenet_mean, std=imagenet_std),
+                    ToTensorV2(),
+                ]
+            )
+
+    def _validate_columns(self) -> None:
+        missing_cols = []
+
+        if self.image_col not in self.df.columns:
+            missing_cols.append(self.image_col)
+
+        if self.label_col not in self.df.columns:
+            missing_cols.append(self.label_col)
+
+        if missing_cols:
+            raise ValueError(
+                f"Missing required columns in CSV {self.csv_path}. "
+                f"Missing: {missing_cols}. Found: {list(self.df.columns)}"
+            )
+
+        if self.image_col != "image_path" and self.images_dir is None:
+            raise ValueError(
+                f"CSV uses image_col='{self.image_col}', so images_dir must be provided. "
+                f"csv_path={self.csv_path}"
+            )
+
+    def __len__(self) -> int:
+        return len(self.df)
+
+    def _resolve_img_path(self, row: pd.Series) -> Path:
+        raw_value = str(row[self.image_col])
+
+        if self.image_col == "image_path":
+            return Path(raw_value)
+
+        return self.images_dir / raw_value  # type: ignore[operator]
+
+    def _read_image(self, img_path: Path):
+        img = cv2.imread(str(img_path), cv2.IMREAD_COLOR)
+        if img is None:
+            return None
+        return cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+
+    def __getitem__(self, idx: int) -> Dict[str, Any]:
+        last_img_path = None
+
+        for _ in range(self.max_decode_retries):
+            row = self.df.iloc[idx]
+            img_path = self._resolve_img_path(row)
+            last_img_path = img_path
+
+            image = self._read_image(img_path)
+
+            if image is not None:
+                label = int(row[self.label_col])
+                augmented = self.transform(image=image)
+
+                sample = {
+                    "image": augmented["image"],
+                    "label": torch.tensor(label, dtype=torch.long),
+                }
+
+                if self.dataset_col and self.dataset_col in row.index:
+                    sample["dataset"] = str(row[self.dataset_col])
+
+                return sample
+
+            self.bad_count += 1
+            if self.log_bad_every > 0 and self.bad_count % self.log_bad_every == 0:
+                print(f"[WARN] Skipped {self.bad_count} unreadable images so far. Latest: {img_path}")
+
+            idx = random.randint(0, len(self.df) - 1)
+
+        raise RuntimeError(
+            f"Too many unreadable images encountered (>{self.max_decode_retries} retries). "
+            f"Check CSV paths / image_dir / dataset integrity. Last attempted: {last_img_path}"
         )
 
-    df = df.rename(columns={
-        image_col_raw: "image_id",
-        label_col_raw: "label",
-    })
-
-    df["label"] = df["label"].astype(int)
-    df["image_id"] = df["image_id"].astype(str) + image_ext
-    df["image_path"] = df["image_id"].apply(lambda x: str(images_dir / x))
-    df["dataset"] = "eyepacs"
-
-    df = df[["image_path", "label", "dataset"]].copy()
-
-    if cfg["data"]["split"].get("verify_files", True):
-        verify_files_exist(df)
-
-    print_distribution(df, "EyePACS full label distribution:")
-    return df
-
-
-def split_eyepacs(df: pd.DataFrame, cfg: dict) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    split_cfg = cfg["data"]["split"]
-    val_size = float(split_cfg.get("eyepacs_val_size", 0.2))
-    random_state = int(split_cfg.get("random_state", 42))
-
-    train_df, val_df = train_test_split(
-        df,
-        test_size=val_size,
-        stratify=df["label"],
-        random_state=random_state,
-    )
-
-    return train_df.reset_index(drop=True), val_df.reset_index(drop=True)
-
 
 # =========================================================
-# APTOS
+# DataModule wrapper
 # =========================================================
-def build_aptos_df(csv_path: Path, images_dir: Path, cfg: dict, split_name: str) -> pd.DataFrame:
-    aptos_cfg = cfg["data"]["sources"]["aptos"]
 
-    image_ext = str(aptos_cfg.get("image_ext", ".png"))
-    image_col_raw = str(aptos_cfg["image_col_raw"])
-    label_col_raw = str(aptos_cfg["label_col_raw"])
+class DRDataModule:
+    def __init__(self, cfg):
+        self.cfg = cfg
+        self.batch_size = int(cfg.training.batch_size)
+        self.num_workers = int(cfg.training.num_workers)
+        self.num_classes = int(cfg.model.num_classes)
+        self.image_size = int(cfg.data.image_size)
 
-    df = pd.read_csv(csv_path)
-    print(f"\nAPTOS {split_name} original columns:", list(df.columns))
+        self.use_dummy = bool(cfg.data.get("use_dummy", False))
+        self.use_weighted_sampler = bool(cfg.data.get("use_weighted_sampler", False))
+        self.sampler_mode = str(cfg.data.get("sampler_mode", "inverse")).lower()
 
-    required_cols = {image_col_raw, label_col_raw}
-    if not required_cols.issubset(df.columns):
-        raise ValueError(
-            f"APTOS {split_name} CSV missing required columns. "
-            f"Required={required_cols}, found={list(df.columns)}"
+        self.train_csv = str(cfg.data.train_csv)
+        self.val_csv = str(cfg.data.val_csv)
+        self.image_dir = str(cfg.data.get("image_dir", ""))
+        self.image_col = str(cfg.data.get("image_col", "image_path"))
+        self.label_col = str(cfg.data.get("label_col", "label"))
+        self.dataset_col = str(cfg.data.get("dataset_col", "dataset"))
+
+    def _pin_memory(self) -> bool:
+        return torch.cuda.is_available()
+
+    def _build_weighted_sampler_from_csv(self, csv_path: str, label_col: str) -> WeightedRandomSampler:
+        df = pd.read_csv(csv_path)
+        labels = df[label_col].astype(int).values
+
+        class_counts = np.bincount(labels, minlength=self.num_classes).astype(np.float32)
+        class_counts = np.maximum(class_counts, 1.0)
+
+        if self.sampler_mode != "inverse":
+            print(f"[WARN] sampler_mode='{self.sampler_mode}' not implemented. Falling back to inverse.")
+
+        class_weights = 1.0 / class_counts
+        sample_weights = class_weights[labels]
+        sample_weights = torch.tensor(sample_weights, dtype=torch.double)
+
+        print("[INFO] Weighted sampler class counts:", class_counts.tolist())
+        print("[INFO] Weighted sampler class weights:", class_weights.tolist())
+
+        return WeightedRandomSampler(
+            weights=sample_weights,
+            num_samples=len(sample_weights),
+            replacement=True,
         )
 
-    df = df.rename(columns={
-        image_col_raw: "image_id",
-        label_col_raw: "label",
-    })
-
-    df["label"] = df["label"].astype(int)
-    df["image_id"] = df["image_id"].astype(str) + image_ext
-    df["image_path"] = df["image_id"].apply(lambda x: str(images_dir / x))
-    df["dataset"] = "aptos"
-
-    df = df[["image_path", "label", "dataset"]].copy()
-
-    if cfg["data"]["split"].get("verify_files", True):
-        verify_files_exist(df)
-
-    print_distribution(df, f"APTOS {split_name} label distribution:")
-    return df
-
-
-# =========================================================
-# IDRiD
-# =========================================================
-def build_idrid_df(csv_path: Path, images_dir: Path, cfg: dict, split_name: str) -> pd.DataFrame:
-    idrid_cfg = cfg["data"]["sources"]["idrid"]
-
-    image_ext = str(idrid_cfg.get("image_ext", ".jpg"))
-    image_col_raw = str(idrid_cfg["image_col_raw"])
-    label_col_raw = str(idrid_cfg["label_col_raw"])
-
-    df = pd.read_csv(csv_path)
-    print(f"\nIDRiD {split_name} original columns:", list(df.columns))
-
-    required_cols = {image_col_raw, label_col_raw}
-    if not required_cols.issubset(df.columns):
-        raise ValueError(
-            f"IDRiD {split_name} CSV missing required columns. "
-            f"Required={required_cols}, found={list(df.columns)}"
+    def _build_dataset(self, csv_path: str, augment: bool) -> Dataset:
+        return DRDataset(
+            csv_path=csv_path,
+            images_dir=self.image_dir,
+            image_col=self.image_col,
+            label_col=self.label_col,
+            dataset_col=self.dataset_col,
+            image_size=self.image_size,
+            augment=augment,
+            max_decode_retries=30,
+            log_bad_every=50,
         )
 
-    # keep only the useful columns and ignore the garbage unnamed columns
-    df = df[[image_col_raw, label_col_raw]].copy()
+    def train_dataloader(self) -> DataLoader:
+        if self.use_dummy:
+            ds = DummyDRDataset(
+                num_samples=256,
+                num_classes=self.num_classes,
+                image_size=self.image_size,
+            )
+            return DataLoader(
+                ds,
+                batch_size=self.batch_size,
+                shuffle=True,
+                num_workers=self.num_workers,
+                pin_memory=self._pin_memory(),
+            )
 
-    df = df.rename(columns={
-        image_col_raw: "image_id",
-        label_col_raw: "label",
-    })
-
-    df["label"] = df["label"].astype(int)
-    df["image_id"] = df["image_id"].astype(str) + image_ext
-    df["image_path"] = df["image_id"].apply(lambda x: str(images_dir / x))
-    df["dataset"] = "idrid"
-
-    df = df[["image_path", "label", "dataset"]].copy()
-
-    if cfg["data"]["split"].get("verify_files", True):
-        verify_files_exist(df)
-
-    print_distribution(df, f"IDRiD {split_name} label distribution:")
-    return df
-
-
-def split_idrid(df: pd.DataFrame, cfg: dict) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    split_cfg = cfg["data"]["split"]
-    val_size = float(split_cfg.get("idrid_val_size", 0.2))
-    random_state = int(split_cfg.get("random_state", 42))
-
-    train_df, val_df = train_test_split(
-        df,
-        test_size=val_size,
-        stratify=df["label"],
-        random_state=random_state,
-    )
-
-    return train_df.reset_index(drop=True), val_df.reset_index(drop=True)
-
-
-# =========================================================
-# Messidor-2 (external test only)
-# =========================================================
-def build_messidor_df(cfg: dict) -> pd.DataFrame:
-    messidor_cfg = cfg["data"]["sources"]["messidor2"]
-
-    labels_csv = Path(messidor_cfg["labels_csv"])
-    images_dir = Path(messidor_cfg["images_dir"])
-    image_col_raw = str(messidor_cfg["image_col_raw"])
-    label_col_raw = str(messidor_cfg["label_col_raw"])
-    gradable_col_raw = str(messidor_cfg["gradable_col_raw"])
-
-    df = pd.read_csv(labels_csv)
-    print("\nMessidor-2 original columns:", list(df.columns))
-
-    required_cols = {image_col_raw, label_col_raw, gradable_col_raw}
-    if not required_cols.issubset(df.columns):
-        raise ValueError(
-            f"Messidor-2 CSV missing required columns. "
-            f"Required={required_cols}, found={list(df.columns)}"
+        ds = self._build_dataset(
+            csv_path=self.train_csv,
+            augment=True,
         )
 
-    # keep only gradable images
-    df = df[df[gradable_col_raw] == 1].copy()
+        if self.use_weighted_sampler:
+            sampler = self._build_weighted_sampler_from_csv(
+                csv_path=self.train_csv,
+                label_col=self.label_col,
+            )
+            return DataLoader(
+                ds,
+                batch_size=self.batch_size,
+                shuffle=False,
+                sampler=sampler,
+                num_workers=self.num_workers,
+                pin_memory=self._pin_memory(),
+            )
 
-    df = df.rename(columns={
-        image_col_raw: "image_id",
-        label_col_raw: "label",
-    })
+        return DataLoader(
+            ds,
+            batch_size=self.batch_size,
+            shuffle=True,
+            num_workers=self.num_workers,
+            pin_memory=self._pin_memory(),
+        )
 
-    df["label"] = df["label"].astype(int)
-    df["image_id"] = df["image_id"].astype(str)  # already has .png in CSV
-    df["image_path"] = df["image_id"].apply(lambda x: str(images_dir / x))
-    df["dataset"] = "messidor2"
+    def val_dataloader(self) -> DataLoader:
+        if self.use_dummy:
+            ds = DummyDRDataset(
+                num_samples=64,
+                num_classes=self.num_classes,
+                image_size=self.image_size,
+            )
+        else:
+            ds = self._build_dataset(
+                csv_path=self.val_csv,
+                augment=False,
+            )
 
-    df = df[["image_path", "label", "dataset"]].copy()
-
-    if cfg["data"]["split"].get("verify_files", True):
-        verify_files_exist(df)
-
-    print_distribution(df, "Messidor-2 external test distribution:")
-    return df
-
-
-# =========================================================
-# Main
-# =========================================================
-def main(cfg_path: str = "configs/base.yaml") -> None:
-    cfg = load_config(cfg_path)
-
-    split_outputs = cfg["data"]["split"]["outputs"]
-
-    aptos_cfg = cfg["data"]["sources"]["aptos"]
-    idrid_cfg = cfg["data"]["sources"]["idrid"]
-
-    aptos_train_csv = Path(aptos_cfg["train_csv"])
-    aptos_val_csv = Path(aptos_cfg["val_csv"])
-    aptos_train_images_dir = Path(aptos_cfg["train_images_dir"])
-    aptos_val_images_dir = Path(aptos_cfg["val_images_dir"])
-
-    idrid_train_csv = Path(idrid_cfg["train_csv"])
-    idrid_train_images_dir = Path(idrid_cfg["train_images_dir"])
-
-    out_eyepacs_train = Path(split_outputs["eyepacs_train_csv"])
-    out_eyepacs_val = Path(split_outputs["eyepacs_val_csv"])
-
-    out_aptos_train = Path(split_outputs["aptos_train_csv"])
-    out_aptos_val = Path(split_outputs["aptos_val_csv"])
-
-    out_idrid_train = Path(split_outputs["idrid_train_csv"])
-    out_idrid_val = Path(split_outputs["idrid_val_csv"])
-
-    out_combined_train = Path(split_outputs["combined_train_csv"])
-    out_combined_val = Path(split_outputs["combined_val_csv"])
-
-    out_messidor_test = Path(split_outputs["messidor2_test_csv"])
-
-    print("===== Building multi-dataset splits =====\n")
-
-    # -------------------------
-    # EyePACS
-    # -------------------------
-    eyepacs_df = build_eyepacs_df(cfg)
-    eyepacs_train_df, eyepacs_val_df = split_eyepacs(eyepacs_df, cfg)
-
-    # -------------------------
-    # APTOS
-    # -------------------------
-    aptos_train_df = build_aptos_df(
-        csv_path=aptos_train_csv,
-        images_dir=aptos_train_images_dir,
-        cfg=cfg,
-        split_name="train",
-    ).reset_index(drop=True)
-
-    aptos_val_df = build_aptos_df(
-        csv_path=aptos_val_csv,
-        images_dir=aptos_val_images_dir,
-        cfg=cfg,
-        split_name="val",
-    ).reset_index(drop=True)
-
-    # -------------------------
-    # IDRiD (use official training CSV only, split internally)
-    # -------------------------
-    idrid_full_train_df = build_idrid_df(
-        csv_path=idrid_train_csv,
-        images_dir=idrid_train_images_dir,
-        cfg=cfg,
-        split_name="train_full",
-    ).reset_index(drop=True)
-
-    idrid_train_df, idrid_val_df = split_idrid(idrid_full_train_df, cfg)
-
-    # -------------------------
-    # Messidor-2 external test
-    # -------------------------
-    messidor_test_df = build_messidor_df(cfg).reset_index(drop=True)
-
-    # -------------------------
-    # Combined train / val
-    # -------------------------
-    random_state = int(cfg["data"]["split"].get("random_state", 42))
-
-    combined_train_df = pd.concat(
-        [eyepacs_train_df, aptos_train_df, idrid_train_df],
-        axis=0
-    ).sample(frac=1, random_state=random_state).reset_index(drop=True)
-
-    combined_val_df = pd.concat(
-        [eyepacs_val_df, aptos_val_df, idrid_val_df],
-        axis=0
-    ).sample(frac=1, random_state=random_state).reset_index(drop=True)
-
-    # -------------------------
-    # Save all CSVs
-    # -------------------------
-    save_df(eyepacs_train_df, out_eyepacs_train, "EyePACS train")
-    save_df(eyepacs_val_df, out_eyepacs_val, "EyePACS val")
-
-    save_df(aptos_train_df, out_aptos_train, "APTOS train")
-    save_df(aptos_val_df, out_aptos_val, "APTOS val")
-
-    save_df(idrid_train_df, out_idrid_train, "IDRiD train")
-    save_df(idrid_val_df, out_idrid_val, "IDRiD val")
-
-    save_df(combined_train_df, out_combined_train, "Combined train")
-    save_df(combined_val_df, out_combined_val, "Combined val")
-
-    save_df(messidor_test_df, out_messidor_test, "Messidor-2 external test")
-
-    # -------------------------
-    # Final summary
-    # -------------------------
-    print("\n===== FINAL SUMMARY =====")
-    print(f"EyePACS train:      {eyepacs_train_df.shape}")
-    print(f"EyePACS val:        {eyepacs_val_df.shape}")
-    print(f"APTOS train:        {aptos_train_df.shape}")
-    print(f"APTOS val:          {aptos_val_df.shape}")
-    print(f"IDRiD train:        {idrid_train_df.shape}")
-    print(f"IDRiD val:          {idrid_val_df.shape}")
-    print(f"Combined train:     {combined_train_df.shape}")
-    print(f"Combined val:       {combined_val_df.shape}")
-    print(f"Messidor-2 test:    {messidor_test_df.shape}")
-
-    print_distribution(combined_train_df, "Combined train distribution:")
-    print_distribution(combined_val_df, "Combined val distribution:")
-    print_distribution(messidor_test_df, "Messidor-2 external test distribution:")
-
-    print("\nDone.")
-
-
-if __name__ == "__main__":
-    main()
+        return DataLoader(
+            ds,
+            batch_size=self.batch_size,
+            shuffle=False,
+            num_workers=self.num_workers,
+            pin_memory=self._pin_memory(),
+        )

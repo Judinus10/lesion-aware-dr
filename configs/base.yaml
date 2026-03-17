@@ -23,6 +23,9 @@ data:
   train_csv: "/kaggle/working/multidata_splits/combined_train.csv"
   val_csv: "/kaggle/working/multidata_splits/combined_val.csv"
 
+  # External evaluation input
+  test_csv: "/kaggle/working/multidata_splits/messidor2_test.csv"
+
   # Loader config
   image_dir: ""
   image_col: "image_path"
@@ -54,21 +57,45 @@ data:
       image_col_raw: "id_code"
       label_col_raw: "diagnosis"
 
+    idrid:
+      train_csv: "/kaggle/input/datasets/abdullahshafi315/indian-diabetic-retinopathy-image-datasetidrid/Disease Grading/2. Groundtruths/a. IDRiD_Disease Grading_Training Labels.csv"
+      test_csv: "/kaggle/input/datasets/abdullahshafi315/indian-diabetic-retinopathy-image-datasetidrid/Disease Grading/2. Groundtruths/b. IDRiD_Disease Grading_Testing Labels.csv"
+      train_images_dir: "/kaggle/input/datasets/abdullahshafi315/indian-diabetic-retinopathy-image-datasetidrid/Disease Grading/1. Original Images/a. Training Set"
+      test_images_dir: "/kaggle/input/datasets/abdullahshafi315/indian-diabetic-retinopathy-image-datasetidrid/Disease Grading/1. Original Images/b. Testing Set"
+      image_ext: ".jpg"
+      image_col_raw: "Image name"
+      label_col_raw: "Retinopathy grade"
+
+    messidor2:
+      labels_csv: "/kaggle/input/datasets/mariaherrerot/messidor2preprocess/messidor_data.csv"
+      images_dir: "/kaggle/input/datasets/mariaherrerot/messidor2preprocess/messidor-2/messidor-2/preprocess"
+      image_col_raw: "id_code"
+      label_col_raw: "diagnosis"
+      gradable_col_raw: "adjudicated_gradable"
+
   # --------------------------------------------------
   # Split-building options
   # --------------------------------------------------
   split:
     random_state: 42
     eyepacs_val_size: 0.2
+    idrid_val_size: 0.2
     verify_files: true
 
     outputs:
       eyepacs_train_csv: "/kaggle/working/multidata_splits/eyepacs_train.csv"
       eyepacs_val_csv: "/kaggle/working/multidata_splits/eyepacs_val.csv"
+
       aptos_train_csv: "/kaggle/working/multidata_splits/aptos_train.csv"
       aptos_val_csv: "/kaggle/working/multidata_splits/aptos_val.csv"
+
+      idrid_train_csv: "/kaggle/working/multidata_splits/idrid_train.csv"
+      idrid_val_csv: "/kaggle/working/multidata_splits/idrid_val.csv"
+
       combined_train_csv: "/kaggle/working/multidata_splits/combined_train.csv"
       combined_val_csv: "/kaggle/working/multidata_splits/combined_val.csv"
+
+      messidor2_test_csv: "/kaggle/working/multidata_splits/messidor2_test.csv"
 
 training:
   seed: 42

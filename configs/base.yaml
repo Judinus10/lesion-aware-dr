@@ -1,5 +1,5 @@
 project_name: "lesion_aware_dr"
-run_name: "efficientnet_cb_focal_multidata_v1"
+run_name: "efficientnet_cb_focal_multidata_v2"
 
 paths:
   data_dir: "/kaggle/working"
@@ -33,7 +33,7 @@ data:
   dataset_col: "dataset"
 
   # Sampler
-  use_weighted_sampler: false
+  use_weighted_sampler: true
   sampler_mode: "inverse"
 
   # --------------------------------------------------
@@ -99,7 +99,7 @@ data:
 
 training:
   seed: 42
-  epochs: 12
+  epochs: 15
   batch_size: 16
   num_workers: 2
   lr: 1e-4
@@ -115,7 +115,7 @@ logging:
 loss:
   name: "cb_focal"
   beta: 0.999
-  gamma: 2.0
+  gamma: 1.5
   alpha_mode: "effective"
   reduction: "mean"
   use_class_weights: false

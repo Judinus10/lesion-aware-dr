@@ -18,11 +18,11 @@ from tqdm import tqdm
 
 from sklearn.metrics import accuracy_score, f1_score
 
-from src.utils.logger import get_logger
-from src.utils.seed import set_seed
-from src.models import build_model
-from src.data.dr_datamodule import DRDataModule
-from src.losses.classifier import get_loss  # ✅ single source of truth
+from classification.src.utils.logger import get_logger
+from classification.src.utils.seed import set_seed
+from classification.src.models import build_model
+from classification.src.data.dr_datamodule import DRDataModule
+from classification.src.losses.classifier import get_loss  # ✅ single source of truth
 
 
 # -------------------------
@@ -36,7 +36,7 @@ def load_config(cfg_path: str) -> OmegaConf:
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--cfg_path", type=str, default="configs/base.yaml")
+    parser.add_argument("--cfg_path", type=str, default="classification/configs/base.yaml")
 
     # ✅ resume support
     parser.add_argument(

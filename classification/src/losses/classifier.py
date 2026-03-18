@@ -8,7 +8,7 @@ import pandas as pd
 import torch
 from torch import nn
 
-from src.models.cb_focal_loss import build_cb_focal_from_cfg
+from classification.src.models.cb_focal_loss import build_cb_focal_from_cfg
 
 
 # -------------------------

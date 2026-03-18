@@ -1,7 +1,9 @@
-import os
+from __future__ import annotations
+
 import json
 import argparse
 from pathlib import Path
+from typing import Optional
 
 import numpy as np
 import pandas as pd
@@ -17,28 +19,77 @@ import albumentations as A
 from albumentations.pytorch import ToTensorV2
 
 from sklearn.metrics import accuracy_score, f1_score, classification_report, confusion_matrix
-
 import matplotlib.pyplot as plt
 
 
-class EyePacsDataset(Dataset):
-    def __init__(self, csv_path: str, image_dir: str, image_col: str, label_col: str, image_size: int, transform=None):
-        self.df = pd.read_csv(csv_path)
-        self.image_dir = image_dir
-        self.image_col = image_col
-        self.label_col = label_col
+class DRCSVDataset(Dataset):
+    """
+    Generic CSV dataset for evaluation.
+
+    Supports:
+    1) Full-path mode:
+       image_path,label,dataset
+       /full/path/to/image.png,0,eyepacs
+
+    2) Relative-name mode:
+       image_id,label
+       img001.png,0
+       + image_dir in config
+    """
+
+    def __init__(
+        self,
+        csv_path: str,
+        image_dir: str,
+        image_col: str,
+        label_col: str,
+        image_size: int,
+        dataset_col: Optional[str] = None,
+        transform=None,
+    ):
+        self.df = pd.read_csv(csv_path).reset_index(drop=True)
+        self.image_dir = str(image_dir).strip()
+        self.image_col = str(image_col)
+        self.label_col = str(label_col)
+        self.dataset_col = str(dataset_col) if dataset_col else None
         self.image_size = int(image_size)
         self.transform = transform
+
+        missing = []
+        if self.image_col not in self.df.columns:
+            missing.append(self.image_col)
+        if self.label_col not in self.df.columns:
+            missing.append(self.label_col)
+
+        if missing:
+            raise ValueError(
+                f"Missing required columns in CSV {csv_path}. "
+                f"Missing={missing}, found={list(self.df.columns)}"
+            )
 
     def __len__(self):
         return len(self.df)
 
+    def _resolve_path(self, raw_value: str) -> Path:
+        raw_value = str(raw_value)
+
+        if self.image_col == "image_path":
+            return Path(raw_value)
+
+        if not self.image_dir:
+            raise ValueError(
+                f"image_dir is empty, but image_col='{self.image_col}' is not full-path mode."
+            )
+
+        return Path(self.image_dir) / raw_value
+
     def __getitem__(self, idx: int):
         row = self.df.iloc[idx]
-        fname = row[self.image_col]
+
+        raw_img_value = row[self.image_col]
         label = int(row[self.label_col])
 
-        img_path = os.path.join(self.image_dir, fname)
+        img_path = self._resolve_path(raw_img_value)
 
         try:
             img = Image.open(img_path).convert("RGB")
@@ -50,7 +101,8 @@ class EyePacsDataset(Dataset):
         if self.transform is not None:
             img = self.transform(image=img)["image"]
 
-        return img, label, fname
+        meta_name = str(raw_img_value)
+        return img, label, meta_name
 
 
 def build_transform(image_size: int):
@@ -62,7 +114,7 @@ def build_transform(image_size: int):
 
 
 def load_cfg(cfg_path: str) -> dict:
-    with open(cfg_path, "r") as f:
+    with open(cfg_path, "r", encoding="utf-8") as f:
         return yaml.safe_load(f)
 
 
@@ -117,31 +169,11 @@ def plot_confusion_matrix(cm: np.ndarray, out_path: str, class_names=None):
     plt.close()
 
 
-def get_train_stats(train_csv: str, label_col: str, num_classes: int, device: torch.device):
-    train_df = pd.read_csv(train_csv)
-
-    class_counts = (
-        train_df[label_col]
-        .value_counts()
-        .sort_index()
-        .reindex(range(num_classes), fill_value=0)
-        .values.astype(np.float64)
-    )
-
-    class_priors = class_counts / class_counts.sum()
-    log_priors = np.log(class_priors + 1e-12)
-
-    log_priors_t = torch.tensor(log_priors, dtype=torch.float32, device=device)
-    class_counts_t = torch.tensor(class_counts, dtype=torch.float32, device=device)
-
-    return log_priors_t, class_counts_t, class_counts, class_priors
-
-
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--cfg_path", type=str, required=True)
     ap.add_argument("--ckpt_path", type=str, default=None)
-    ap.add_argument("--split", type=str, default="val", choices=["val", "train"])
+    ap.add_argument("--split", type=str, default="val", choices=["train", "val", "test"])
     ap.add_argument("--batch_size", type=int, default=32)
     ap.add_argument("--num_workers", type=int, default=2)
     args = ap.parse_args()
@@ -152,53 +184,52 @@ def main():
     num_classes = int(cfg["model"]["num_classes"])
 
     image_size = int(cfg["data"]["image_size"])
-    image_dir = cfg["data"]["image_dir"]
+    image_dir = cfg["data"].get("image_dir", "")
     image_col = cfg["data"]["image_col"]
     label_col = cfg["data"]["label_col"]
+    dataset_col = cfg["data"].get("dataset_col", None)
 
     train_csv = cfg["data"]["train_csv"]
     val_csv = cfg["data"]["val_csv"]
+    test_csv = cfg["data"].get("test_csv", None)
 
     outputs_dir = cfg["paths"]["outputs_dir"]
 
-    loss_name = cfg.get("loss", {}).get("name", "ce")
-    tau = float(cfg.get("loss", {}).get("tau", 1.0))
+    loss_name = str(cfg.get("loss", {}).get("name", "ce")).lower()
 
-    csv_path = val_csv if args.split == "val" else train_csv
+    if args.split == "train":
+        csv_path = train_csv
+    elif args.split == "val":
+        csv_path = val_csv
+    else:
+        if not test_csv:
+            raise ValueError("Requested split='test' but cfg.data.test_csv is missing.")
+        csv_path = test_csv
 
     if args.ckpt_path is None:
         ckpt_dir = cfg["paths"]["checkpoints_dir"]
         args.ckpt_path = str(Path(ckpt_dir) / "best_macro_f1_model.pt")
 
     ckpt_name = Path(args.ckpt_path).stem
-    eval_dir = Path(outputs_dir) / "eval" / ckpt_name
+    eval_dir = Path(outputs_dir) / "eval" / f"{args.split}_{ckpt_name}"
     eval_dir.mkdir(parents=True, exist_ok=True)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"[EVAL] device: {device}")
+    print(f"[EVAL] split: {args.split}")
     print(f"[EVAL] csv: {csv_path}")
     print(f"[EVAL] image_dir: {image_dir}")
     print(f"[EVAL] ckpt: {args.ckpt_path}")
     print(f"[EVAL] loss_name: {loss_name}")
-    if loss_name == "logit_adjusted_ce":
-        print(f"[EVAL] tau: {tau}")
-
-    log_priors_t, class_counts_t, class_counts, class_priors = get_train_stats(
-        train_csv=train_csv,
-        label_col=label_col,
-        num_classes=num_classes,
-        device=device,
-    )
-
-    print(f"[EVAL] class_counts: {class_counts.tolist()}")
-    print(f"[EVAL] class_priors: {[round(float(x), 6) for x in class_priors]}")
+    print("[EVAL] prediction_rule: raw_logits_argmax")
 
     tfm = build_transform(image_size)
-    ds = EyePacsDataset(
+    ds = DRCSVDataset(
         csv_path=csv_path,
         image_dir=image_dir,
         image_col=image_col,
         label_col=label_col,
+        dataset_col=dataset_col,
         image_size=image_size,
         transform=tfm,
     )
@@ -207,7 +238,7 @@ def main():
         batch_size=args.batch_size,
         shuffle=False,
         num_workers=args.num_workers,
-        pin_memory=True,
+        pin_memory=torch.cuda.is_available(),
     )
 
     model = timm.create_model(backbone, pretrained=False, num_classes=num_classes)
@@ -231,15 +262,8 @@ def main():
             else:
                 logits = model(x)
 
-            if loss_name == "logit_adjusted_ce":
-                adjusted_logits = logits + tau * log_priors_t.unsqueeze(0)
-            elif loss_name == "balanced_softmax":
-                adjusted_logits = logits + torch.log(class_counts_t.unsqueeze(0) + 1e-12)
-            else:
-                adjusted_logits = logits
-
-            probs = torch.softmax(adjusted_logits, dim=1)
-            pred = torch.argmax(adjusted_logits, dim=1)
+            probs = torch.softmax(logits, dim=1)
+            pred = torch.argmax(logits, dim=1)
 
             y_true.extend(y.cpu().numpy().tolist())
             y_pred.extend(pred.cpu().numpy().tolist())
@@ -257,9 +281,10 @@ def main():
     print("\nClassification report:\n")
     print(report)
 
-    (eval_dir / "classification_report.txt").write_text(report)
+    (eval_dir / "classification_report.txt").write_text(report, encoding="utf-8")
 
     metrics = {
+        "split": args.split,
         "accuracy": acc,
         "macro_f1": macro_f1,
         "num_samples": len(y_true),
@@ -268,16 +293,14 @@ def main():
         "image_dir": image_dir,
         "backbone": backbone,
         "loss_name": loss_name,
-        "tau": tau if loss_name == "logit_adjusted_ce" else None,
-        "class_counts": class_counts.tolist(),
-        "class_priors": class_priors.tolist(),
+        "prediction_rule": "raw_logits_argmax",
     }
-    (eval_dir / "metrics.json").write_text(json.dumps(metrics, indent=2))
+    (eval_dir / "metrics.json").write_text(json.dumps(metrics, indent=2), encoding="utf-8")
 
     plot_confusion_matrix(cm, str(eval_dir / "confusion_matrix.png"))
 
     pred_df = pd.DataFrame({
-        "image_id": names_all,
+        "image_ref": names_all,
         "y_true": y_true,
         "y_pred": y_pred,
     })

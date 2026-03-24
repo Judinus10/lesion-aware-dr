@@ -1,111 +1,110 @@
 from __future__ import annotations
 
 import argparse
-import yaml
-from omegaconf import OmegaConf
+import json
+from pathlib import Path
 
-import numpy as np
 import torch
+import yaml
+from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from segmentation.src.models import build_model
-from segmentation.src.data.dr_datamodule import DRDataModule
-from segmentation.src.losses.segmentation import get_loss
+from src.data.dataset import SegmentationDataset
+from src.losses.segmentation import BCEDiceLoss
+from src.models.unet import UNet
+from src.utils.logger import get_logger
+from src.utils.metrics import compute_batch_metrics
 
 
-def load_config(cfg_path: str):
-    with open(cfg_path, "r", encoding="utf-8") as f:
-        cfg_dict = yaml.safe_load(f)
-    return OmegaConf.create(cfg_dict)
-
-
-def parse_args():
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--cfg_path", type=str, default="segmentation/configs/base.yaml")
-    parser.add_argument("--ckpt_path", type=str, required=True)
-    parser.add_argument("--split", type=str, default="test", choices=["val", "test"])
-    return parser.parse_args()
-
-
-@torch.no_grad()
-def compute_metrics(logits: torch.Tensor, targets: torch.Tensor, threshold: float = 0.5):
-    probs = torch.sigmoid(logits)
-    preds = (probs > threshold).float()
-
-    dims = (0, 2, 3)
-    intersection = (preds * targets).sum(dim=dims)
-    union = preds.sum(dim=dims) + targets.sum(dim=dims) - intersection
-    denom = preds.sum(dim=dims) + targets.sum(dim=dims)
-
-    iou = (intersection + 1e-6) / (union + 1e-6)
-    dice = (2 * intersection + 1e-6) / (denom + 1e-6)
-
-    return {
-        "iou_ex": float(iou[0].item()),
-        "iou_he": float(iou[1].item()),
-        "dice_ex": float(dice[0].item()),
-        "dice_he": float(dice[1].item()),
-        "mean_iou": float(iou.mean().item()),
-        "mean_dice": float(dice.mean().item()),
-    }
-
-
-@torch.no_grad()
-def evaluate(model, loader, criterion, device, threshold: float):
-    model.eval()
-    running_loss = 0.0
-    metric_list = []
-
-    for batch in tqdm(loader, desc="Eval"):
-        images = batch["image"].to(device, non_blocking=True)
-        masks = batch["mask"].to(device, non_blocking=True)
-
-        logits = model(images)
-        loss = criterion(logits, masks)
-
-        running_loss += loss.item()
-        metric_list.append(compute_metrics(logits, masks, threshold=threshold))
-
-    avg_loss = running_loss / max(len(loader), 1)
-    keys = metric_list[0].keys() if metric_list else []
-    avg_metrics = {k: float(np.mean([m[k] for m in metric_list])) for k in keys}
-
-    return avg_loss, avg_metrics
+def load_config(cfg_path: str) -> dict:
+    with open(cfg_path, "r") as f:
+        return yaml.safe_load(f)
 
 
 def main():
-    args = parse_args()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--cfg_path", type=str, default="configs/base.yaml")
+    parser.add_argument("--ckpt_path", type=str, default=None)
+    args = parser.parse_args()
+
     cfg = load_config(args.cfg_path)
+    device_name = cfg.get("device", "cuda")
+    device = torch.device(device_name if torch.cuda.is_available() else "cpu")
 
-    device = torch.device(
-        "cuda" if str(cfg.device).lower() == "cuda" and torch.cuda.is_available() else "cpu"
+    output_dir = Path(cfg["paths"]["outputs_dir"])
+    output_dir.mkdir(parents=True, exist_ok=True)
+    logger = get_logger("seg_eval", str(output_dir / "eval.log"))
+
+    ckpt_path = args.ckpt_path or str(output_dir / "checkpoints" / "best_model.pt")
+    logger.info(f"Using checkpoint: {ckpt_path}")
+
+    dataset = SegmentationDataset(
+        csv_path=cfg["paths"]["test_csv"],
+        image_size=int(cfg["data"]["image_size"]),
+        is_train=False,
+    )
+    loader = DataLoader(
+        dataset,
+        batch_size=int(cfg["data"]["batch_size"]),
+        shuffle=False,
+        num_workers=int(cfg["data"]["num_workers"]),
+        pin_memory=bool(cfg["data"]["pin_memory"]),
     )
 
-    dm = DRDataModule(cfg)
-    loader = dm.val_dataloader() if args.split == "val" else dm.test_dataloader()
+    model = UNet(
+        in_channels=cfg["model"]["in_channels"],
+        out_channels=cfg["model"]["out_channels"],
+        base_channels=cfg["model"]["base_channels"],
+    ).to(device)
 
-    model = build_model(cfg).to(device)
-    criterion = get_loss(cfg)
+    criterion = BCEDiceLoss(
+        bce_weight=float(cfg["loss"]["bce_weight"]),
+        dice_weight=float(cfg["loss"]["dice_weight"]),
+        smooth=float(cfg["loss"].get("smooth", 1.0)),
+    )
 
-    ckpt = torch.load(args.ckpt_path, map_location=device)
+    ckpt = torch.load(ckpt_path, map_location=device)
     model.load_state_dict(ckpt["model_state_dict"])
+    model.eval()
 
-    loss, metrics = evaluate(
-        model,
-        loader,
-        criterion,
-        device,
-        threshold=float(cfg.data.threshold),
-    )
+    total_loss = 0.0
+    total_metrics = {
+        "dice_ex": 0.0,
+        "dice_he": 0.0,
+        "dice_mean": 0.0,
+        "iou_ex": 0.0,
+        "iou_he": 0.0,
+        "iou_mean": 0.0,
+    }
+    count = 0
 
-    print(f"\n[{args.split.upper()} RESULTS]")
-    print(f"loss      : {loss:.4f}")
-    print(f"mean_dice : {metrics['mean_dice']:.4f}")
-    print(f"mean_iou  : {metrics['mean_iou']:.4f}")
-    print(f"dice_ex   : {metrics['dice_ex']:.4f}")
-    print(f"dice_he   : {metrics['dice_he']:.4f}")
-    print(f"iou_ex    : {metrics['iou_ex']:.4f}")
-    print(f"iou_he    : {metrics['iou_he']:.4f}")
+    threshold = float(cfg["data"]["threshold"])
+
+    with torch.no_grad():
+        for images, targets, _ in tqdm(loader):
+            images = images.to(device, non_blocking=True)
+            targets = targets.to(device, non_blocking=True)
+
+            logits = model(images)
+            loss = criterion(logits, targets)
+            metrics = compute_batch_metrics(logits, targets, threshold=threshold)
+
+            total_loss += float(loss.item())
+            for k in total_metrics:
+                total_metrics[k] += metrics[k]
+            count += 1
+
+    results = {
+        "test_loss": total_loss / max(1, count),
+        **{f"test_{k}": v / max(1, count) for k, v in total_metrics.items()},
+    }
+
+    logger.info(json.dumps(results, indent=2))
+
+    with open(output_dir / "test_metrics.json", "w") as f:
+        json.dump(results, f, indent=2)
+
+    print(json.dumps(results, indent=2))
 
 
 if __name__ == "__main__":

@@ -11,7 +11,6 @@ class DoubleConv(nn.Module):
             nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1, bias=False),
             nn.BatchNorm2d(out_channels),
             nn.ReLU(inplace=True),
-
             nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=1, bias=False),
             nn.BatchNorm2d(out_channels),
             nn.ReLU(inplace=True),
@@ -47,44 +46,30 @@ class Up(nn.Module):
 
         x1 = nn.functional.pad(
             x1,
-            [diff_x // 2, diff_x - diff_x // 2, diff_y // 2, diff_y - diff_y // 2]
+            [diff_x // 2, diff_x - diff_x // 2, diff_y // 2, diff_y - diff_y // 2],
         )
 
         x = torch.cat([x2, x1], dim=1)
         return self.conv(x)
 
 
-class OutConv(nn.Module):
-    def __init__(self, in_channels: int, out_channels: int):
-        super().__init__()
-        self.conv = nn.Conv2d(in_channels, out_channels, kernel_size=1)
-
-    def forward(self, x):
-        return self.conv(x)
-
-
 class UNet(nn.Module):
     def __init__(self, in_channels: int = 3, out_channels: int = 2, base_channels: int = 32):
         super().__init__()
+        c = base_channels
 
-        c1 = base_channels
-        c2 = c1 * 2
-        c3 = c2 * 2
-        c4 = c3 * 2
-        c5 = c4 * 2
+        self.inc = DoubleConv(in_channels, c)
+        self.down1 = Down(c, c * 2)
+        self.down2 = Down(c * 2, c * 4)
+        self.down3 = Down(c * 4, c * 8)
+        self.down4 = Down(c * 8, c * 16)
 
-        self.inc = DoubleConv(in_channels, c1)
-        self.down1 = Down(c1, c2)
-        self.down2 = Down(c2, c3)
-        self.down3 = Down(c3, c4)
-        self.down4 = Down(c4, c5)
+        self.up1 = Up(c * 16, c * 8)
+        self.up2 = Up(c * 8, c * 4)
+        self.up3 = Up(c * 4, c * 2)
+        self.up4 = Up(c * 2, c)
 
-        self.up1 = Up(c5, c4)
-        self.up2 = Up(c4, c3)
-        self.up3 = Up(c3, c2)
-        self.up4 = Up(c2, c1)
-
-        self.outc = OutConv(c1, out_channels)
+        self.outc = nn.Conv2d(c, out_channels, kernel_size=1)
 
     def forward(self, x):
         x1 = self.inc(x)
@@ -98,5 +83,4 @@ class UNet(nn.Module):
         x = self.up3(x, x2)
         x = self.up4(x, x1)
 
-        logits = self.outc(x)
-        return logits
+        return self.outc(x)

@@ -1,19 +1,28 @@
 from __future__ import annotations
 
+import logging
 import os
-import random
-import numpy as np
-import torch
+from pathlib import Path
 
 
-def set_seed(seed: int = 42) -> None:
-    random.seed(seed)
-    np.random.seed(seed)
-    os.environ["PYTHONHASHSEED"] = str(seed)
+def get_logger(name: str, log_file: str | None = None) -> logging.Logger:
+    logger = logging.getLogger(name)
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
 
-    torch.manual_seed(seed)
-    torch.cuda.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
+    if logger.handlers:
+        return logger
 
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
+    fmt = logging.Formatter("[%(asctime)s] [%(levelname)s] %(message)s")
+
+    console_handler = logging.StreamHandler()
+    console_handler.setFormatter(fmt)
+    logger.addHandler(console_handler)
+
+    if log_file is not None:
+        Path(os.path.dirname(log_file)).mkdir(parents=True, exist_ok=True)
+        file_handler = logging.FileHandler(log_file)
+        file_handler.setFormatter(fmt)
+        logger.addHandler(file_handler)
+
+    return logger

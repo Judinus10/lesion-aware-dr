@@ -2,15 +2,16 @@ project_name: lesion_aware_dr_segmentation
 run_name: unet_ex_he_segmentation
 
 paths:
-  train_csv: data/processed/segmentation/train.csv
-  val_csv: data/processed/segmentation/val.csv
-  test_csv: data/processed/segmentation/test.csv
-  outputs_dir: outputs/segmentation
+  raw_root: /content/drive/MyDrive/IDRiD_Unet/Segmentation
+  train_csv: /content/drive/MyDrive/Lesion_aware_DR/code/lesion-aware-dr/data/processed/segmentation/train.csv
+  val_csv: /content/drive/MyDrive/Lesion_aware_DR/code/lesion-aware-dr/data/processed/segmentation/val.csv
+  test_csv: /content/drive/MyDrive/Lesion_aware_DR/code/lesion-aware-dr/data/processed/segmentation/test.csv
+  outputs_dir: /content/drive/MyDrive/Lesion_aware_DR/code/lesion-aware-dr/outputs/segmentation
 
 model:
   name: unet
   in_channels: 3
-  out_channels: 2   # [exudates, hemorrhages]
+  out_channels: 2
   base_channels: 32
 
 data:
@@ -19,22 +20,26 @@ data:
   num_workers: 2
   pin_memory: true
   threshold: 0.5
+  train_val_split: 0.2
 
 training:
   epochs: 30
-  lr: 1e-4
-  weight_decay: 1e-5
+  lr: 1.0e-4
+  weight_decay: 1.0e-5
   optimizer: adamw
   scheduler: cosine
+  min_lr: 1.0e-6
 
 loss:
   bce_weight: 0.5
   dice_weight: 0.5
+  smooth: 1.0
 
 logging:
   use_wandb: false
   wandb_project: lesion_aware_dr_segmentation
   wandb_entity: null
+  log_interval: 10
 
 seed: 42
 device: cuda

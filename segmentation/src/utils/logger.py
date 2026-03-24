@@ -1,38 +1,28 @@
 from __future__ import annotations
 
-from typing import Dict
+import logging
+import os
+from pathlib import Path
 
-import torch
 
+def get_logger(name: str, log_file: str | None = None) -> logging.Logger:
+    logger = logging.getLogger(name)
+    logger.setLevel(logging.INFO)
+    logger.propagate = False
 
-def compute_batch_metrics(
-    logits: torch.Tensor,
-    targets: torch.Tensor,
-    threshold: float = 0.5,
-    smooth: float = 1.0,
-) -> Dict[str, float]:
-    probs = torch.sigmoid(logits)
-    preds = (probs > threshold).float()
+    if logger.handlers:
+        return logger
 
-    preds = preds.view(preds.size(0), preds.size(1), -1)
-    targets = targets.view(targets.size(0), targets.size(1), -1)
+    fmt = logging.Formatter("[%(asctime)s] [%(levelname)s] %(message)s")
 
-    intersection = (preds * targets).sum(dim=2)
-    pred_sum = preds.sum(dim=2)
-    target_sum = targets.sum(dim=2)
-    union = pred_sum + target_sum - intersection
+    console_handler = logging.StreamHandler()
+    console_handler.setFormatter(fmt)
+    logger.addHandler(console_handler)
 
-    dice = (2.0 * intersection + smooth) / (pred_sum + target_sum + smooth)
-    iou = (intersection + smooth) / (union + smooth)
+    if log_file is not None:
+        Path(os.path.dirname(log_file)).mkdir(parents=True, exist_ok=True)
+        file_handler = logging.FileHandler(log_file)
+        file_handler.setFormatter(fmt)
+        logger.addHandler(file_handler)
 
-    dice_mean = dice.mean(dim=0)
-    iou_mean = iou.mean(dim=0)
-
-    return {
-        "dice_ex": float(dice_mean[0].item()),
-        "dice_he": float(dice_mean[1].item()),
-        "dice_mean": float(dice.mean().item()),
-        "iou_ex": float(iou_mean[0].item()),
-        "iou_he": float(iou_mean[1].item()),
-        "iou_mean": float(iou.mean().item()),
-    }
+    return logger

@@ -2,12 +2,12 @@ project_name: lesion_aware_dr_segmentation
 run_name: unet_ex_he_segmentation
 
 paths:
-  raw_root: /content/drive/MyDrive/IDRiD_Unet/Segmentation
+  raw_root: /content/drive/MyDrive/Lesion_aware_DR/IDRiD/IDRiD_Unet/Segmentation
   train_csv: /content/drive/MyDrive/Lesion_aware_DR/code/lesion-aware-dr/data/processed/segmentation/train.csv
   val_csv: /content/drive/MyDrive/Lesion_aware_DR/code/lesion-aware-dr/data/processed/segmentation/val.csv
   test_csv: /content/drive/MyDrive/Lesion_aware_DR/code/lesion-aware-dr/data/processed/segmentation/test.csv
   outputs_dir: /content/drive/MyDrive/Lesion_aware_DR/code/lesion-aware-dr/outputs/segmentation
-
+  
 model:
   name: unet
   in_channels: 3

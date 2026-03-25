@@ -10,21 +10,12 @@ import pandas as pd
 import yaml
 
 
-IMAGE_EXTS = [".jpg", ".jpeg", ".png", ".tif", ".tiff"]
-
-
 def load_config(cfg_path: str) -> dict:
     with open(cfg_path, "r") as f:
         return yaml.safe_load(f)
 
 
 def extract_id(path: Path) -> Optional[str]:
-    """
-    Extract numeric id from names like:
-    IDRiD_01.jpg
-    IDRiD_01_EX.tif
-    IDRiD_01_HE.tif
-    """
     m = re.search(r"IDRiD_(\d+)", path.stem)
     if not m:
         return None
@@ -32,28 +23,38 @@ def extract_id(path: Path) -> Optional[str]:
 
 
 def index_files(folder: Path) -> Dict[str, Path]:
-    files = {}
+    out: Dict[str, Path] = {}
     for p in folder.iterdir():
         if p.is_file():
             idx = extract_id(p)
             if idx is not None:
-                files[idx] = p
-    return files
+                out[idx] = p
+    return out
 
 
 def build_rows(
     image_dir: Path,
     ex_dir: Path,
     he_dir: Path,
+    ma_dir: Path,
+    od_dir: Path,
     split_name: str,
 ) -> List[dict]:
     image_index = index_files(image_dir)
     ex_index = index_files(ex_dir)
     he_index = index_files(he_dir)
+    ma_index = index_files(ma_dir)
+    od_index = index_files(od_dir)
 
-    common_ids = sorted(set(image_index.keys()) & set(ex_index.keys()) & set(he_index.keys()))
-    rows = []
+    common_ids = sorted(
+        set(image_index.keys())
+        & set(ex_index.keys())
+        & set(he_index.keys())
+        & set(ma_index.keys())
+        & set(od_index.keys())
+    )
 
+    rows: List[dict] = []
     for idx in common_ids:
         rows.append(
             {
@@ -62,6 +63,8 @@ def build_rows(
                 "image_path": str(image_index[idx]),
                 "ex_mask_path": str(ex_index[idx]),
                 "he_mask_path": str(he_index[idx]),
+                "ma_mask_path": str(ma_index[idx]),
+                "od_mask_path": str(od_index[idx]),
             }
         )
     return rows
@@ -74,13 +77,13 @@ def main():
 
     cfg = load_config(args.cfg_path)
     raw_root = Path(cfg["paths"]["raw_root"])
+
     out_train = Path(cfg["paths"]["train_csv"])
     out_val = Path(cfg["paths"]["val_csv"])
     out_test = Path(cfg["paths"]["test_csv"])
 
-    random.seed(cfg.get("seed", 42))
+    random.seed(int(cfg.get("seed", 42)))
 
-    # dataset folders
     original_images = raw_root / "Original_Images"
     gt_root = raw_root / "Segmentation_Groundtruths"
 
@@ -89,27 +92,35 @@ def main():
 
     train_ex_dir = gt_root / "Training Set" / "Hard Exudates"
     train_he_dir = gt_root / "Training Set" / "Haemorrhages"
+    train_ma_dir = gt_root / "Training Set" / "Microaneurysms"
+    train_od_dir = gt_root / "Training Set" / "Optic Disc"
 
     test_ex_dir = gt_root / "Testing Set" / "Hard Exudates"
     test_he_dir = gt_root / "Testing Set" / "Haemorrhages"
+    test_ma_dir = gt_root / "Testing Set" / "Microaneurysms"
+    test_od_dir = gt_root / "Testing Set" / "Optic Disc"
 
-    train_rows_full = build_rows(train_img_dir, train_ex_dir, train_he_dir, "train")
-    test_rows = build_rows(test_img_dir, test_ex_dir, test_he_dir, "test")
+    train_rows_full = build_rows(
+        train_img_dir, train_ex_dir, train_he_dir, train_ma_dir, train_od_dir, "train"
+    )
+    test_rows = build_rows(
+        test_img_dir, test_ex_dir, test_he_dir, test_ma_dir, test_od_dir, "test"
+    )
 
     if len(train_rows_full) == 0:
-        raise RuntimeError("No training rows found. Check folder names and file names.")
+        raise RuntimeError("No training rows found. Check dataset folders and filenames.")
     if len(test_rows) == 0:
-        raise RuntimeError("No test rows found. Check folder names and file names.")
+        raise RuntimeError("No test rows found. Check dataset folders and filenames.")
 
     df_train_full = pd.DataFrame(train_rows_full)
     df_test = pd.DataFrame(test_rows)
 
     val_ratio = float(cfg["data"].get("train_val_split", 0.2))
-    shuffled_idx = list(df_train_full.index)
-    random.shuffle(shuffled_idx)
+    indices = list(df_train_full.index)
+    random.shuffle(indices)
 
-    val_size = max(1, int(len(shuffled_idx) * val_ratio))
-    val_idx = set(shuffled_idx[:val_size])
+    val_size = max(1, int(len(indices) * val_ratio))
+    val_idx = set(indices[:val_size])
 
     df_train = df_train_full[~df_train_full.index.isin(val_idx)].copy().reset_index(drop=True)
     df_val = df_train_full[df_train_full.index.isin(val_idx)].copy().reset_index(drop=True)

@@ -54,7 +54,7 @@ class Up(nn.Module):
 
 
 class UNet(nn.Module):
-    def __init__(self, in_channels: int = 3, out_channels: int = 2, base_channels: int = 32):
+    def __init__(self, in_channels: int = 3, out_channels: int = 4, base_channels: int = 32):
         super().__init__()
         c = base_channels
 

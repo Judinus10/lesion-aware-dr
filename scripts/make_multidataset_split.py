@@ -250,9 +250,9 @@ def split_idrid(df: pd.DataFrame, cfg: dict) -> Tuple[pd.DataFrame, pd.DataFrame
     return train_df.reset_index(drop=True), val_df.reset_index(drop=True)
 
 
-def main(cfg_path: str = "classification/configs/base.yaml") -> None:    
+def main(cfg_path: str = "configs/base.yaml") -> None:
     cfg = load_config(cfg_path)
-    
+
     split_outputs = cfg["data"]["split"]["outputs"]
 
     aptos_cfg = cfg["data"]["sources"]["aptos"]

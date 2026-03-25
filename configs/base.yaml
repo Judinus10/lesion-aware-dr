@@ -33,7 +33,7 @@ data:
   dataset_col: "dataset"
 
   # Sampler
-  use_weighted_sampler: false
+  use_weighted_sampler: true
   sampler_mode: "inverse"
 
   # --------------------------------------------------

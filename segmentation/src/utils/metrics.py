@@ -5,6 +5,9 @@ from typing import Dict
 import torch
 
 
+CHANNEL_NAMES = ["ex", "he", "ma", "od"]
+
+
 def compute_batch_metrics(
     logits: torch.Tensor,
     targets: torch.Tensor,
@@ -25,14 +28,15 @@ def compute_batch_metrics(
     dice = (2.0 * intersection + smooth) / (pred_sum + target_sum + smooth)
     iou = (intersection + smooth) / (union + smooth)
 
-    dice_mean = dice.mean(dim=0)
-    iou_mean = iou.mean(dim=0)
+    dice_mean_per_channel = dice.mean(dim=0)
+    iou_mean_per_channel = iou.mean(dim=0)
 
-    return {
-        "dice_ex": float(dice_mean[0].item()),
-        "dice_he": float(dice_mean[1].item()),
-        "dice_mean": float(dice.mean().item()),
-        "iou_ex": float(iou_mean[0].item()),
-        "iou_he": float(iou_mean[1].item()),
-        "iou_mean": float(iou.mean().item()),
-    }
+    results: Dict[str, float] = {}
+    for i, name in enumerate(CHANNEL_NAMES):
+        results[f"dice_{name}"] = float(dice_mean_per_channel[i].item())
+        results[f"iou_{name}"] = float(iou_mean_per_channel[i].item())
+
+    results["dice_mean"] = float(dice.mean().item())
+    results["iou_mean"] = float(iou.mean().item())
+
+    return results

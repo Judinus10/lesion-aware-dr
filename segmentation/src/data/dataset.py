@@ -19,6 +19,7 @@ def build_transforms(image_size: int, is_train: bool):
                 A.HorizontalFlip(p=0.5),
                 A.VerticalFlip(p=0.2),
                 A.Rotate(limit=15, p=0.5),
+                A.RandomBrightnessContrast(p=0.3),
                 A.Normalize(mean=(0.485, 0.456, 0.406), std=(0.229, 0.224, 0.225)),
             ]
         )
@@ -36,7 +37,13 @@ class SegmentationDataset(Dataset):
         self.df = pd.read_csv(csv_path)
         self.transforms = build_transforms(image_size=image_size, is_train=is_train)
 
-        required_cols = ["image_path", "ex_mask_path", "he_mask_path"]
+        required_cols = [
+            "image_path",
+            "ex_mask_path",
+            "he_mask_path",
+            "ma_mask_path",
+            "od_mask_path",
+        ]
         missing = [c for c in required_cols if c not in self.df.columns]
         if missing:
             raise ValueError(f"Missing required columns in CSV: {missing}")
@@ -66,12 +73,18 @@ class SegmentationDataset(Dataset):
         image = self._read_image(row["image_path"])
         ex_mask = self._read_mask(row["ex_mask_path"])
         he_mask = self._read_mask(row["he_mask_path"])
+        ma_mask = self._read_mask(row["ma_mask_path"])
+        od_mask = self._read_mask(row["od_mask_path"])
 
-        transformed = self.transforms(image=image, masks=[ex_mask, he_mask])
+        transformed = self.transforms(
+            image=image,
+            masks=[ex_mask, he_mask, ma_mask, od_mask],
+        )
+
         image = transformed["image"]
-        ex_mask, he_mask = transformed["masks"]
+        ex_mask, he_mask, ma_mask, od_mask = transformed["masks"]
 
-        target = np.stack([ex_mask, he_mask], axis=0).astype(np.float32)
+        target = np.stack([ex_mask, he_mask, ma_mask, od_mask], axis=0).astype(np.float32)
         image = np.transpose(image, (2, 0, 1)).astype(np.float32)
 
         image_tensor = torch.from_numpy(image)

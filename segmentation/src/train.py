@@ -64,6 +64,21 @@ def make_loader(csv_path: str, cfg: dict, is_train: bool) -> DataLoader:
     )
 
 
+def init_metric_sums():
+    return {
+        "dice_ex": 0.0,
+        "dice_he": 0.0,
+        "dice_ma": 0.0,
+        "dice_od": 0.0,
+        "dice_mean": 0.0,
+        "iou_ex": 0.0,
+        "iou_he": 0.0,
+        "iou_ma": 0.0,
+        "iou_od": 0.0,
+        "iou_mean": 0.0,
+    }
+
+
 def run_one_epoch(model, loader, criterion, optimizer, device, threshold, train: bool):
     if train:
         model.train()
@@ -71,16 +86,9 @@ def run_one_epoch(model, loader, criterion, optimizer, device, threshold, train:
         model.eval()
 
     total_loss = 0.0
-    total_metrics = {
-        "dice_ex": 0.0,
-        "dice_he": 0.0,
-        "dice_mean": 0.0,
-        "iou_ex": 0.0,
-        "iou_he": 0.0,
-        "iou_mean": 0.0,
-    }
-
+    total_metrics = init_metric_sums()
     num_batches = 0
+
     pbar = tqdm(loader, leave=False)
 
     for images, targets, _ in pbar:
@@ -111,7 +119,6 @@ def run_one_epoch(model, loader, criterion, optimizer, device, threshold, train:
 
     avg_loss = total_loss / max(1, num_batches)
     avg_metrics = {k: v / max(1, num_batches) for k, v in total_metrics.items()}
-
     return avg_loss, avg_metrics
 
 
@@ -195,12 +202,15 @@ def main():
             f"train_dice={train_metrics['dice_mean']:.4f} | "
             f"train_iou={train_metrics['iou_mean']:.4f}"
         )
+
         logger.info(
             f"val_loss={val_loss:.4f} | "
-            f"val_dice={val_metrics['dice_mean']:.4f} | "
-            f"val_iou={val_metrics['iou_mean']:.4f} | "
+            f"val_dice_mean={val_metrics['dice_mean']:.4f} | "
+            f"val_iou_mean={val_metrics['iou_mean']:.4f} | "
             f"val_dice_ex={val_metrics['dice_ex']:.4f} | "
-            f"val_dice_he={val_metrics['dice_he']:.4f}"
+            f"val_dice_he={val_metrics['dice_he']:.4f} | "
+            f"val_dice_ma={val_metrics['dice_ma']:.4f} | "
+            f"val_dice_od={val_metrics['dice_od']:.4f}"
         )
 
         torch.save(

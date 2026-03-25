@@ -1,5 +1,5 @@
 project_name: lesion_aware_dr_segmentation
-run_name: unet_ex_he_segmentation
+run_name: unet_ex_he_ma_od_segmentation
 
 paths:
   raw_root: /content/drive/MyDrive/Lesion_aware_DR/IDRiD/IDRiD_Unet/Segmentation
@@ -7,11 +7,11 @@ paths:
   val_csv: /content/drive/MyDrive/Lesion_aware_DR/code/lesion-aware-dr/data/processed/segmentation/val.csv
   test_csv: /content/drive/MyDrive/Lesion_aware_DR/code/lesion-aware-dr/data/processed/segmentation/test.csv
   outputs_dir: /content/drive/MyDrive/Lesion_aware_DR/code/lesion-aware-dr/outputs/segmentation
-  
+
 model:
   name: unet
   in_channels: 3
-  out_channels: 2
+  out_channels: 4
   base_channels: 32
 
 data:
@@ -19,11 +19,11 @@ data:
   batch_size: 4
   num_workers: 2
   pin_memory: true
-  threshold: 0.5
+  threshold: 0.3
   train_val_split: 0.2
 
 training:
-  epochs: 30
+  epochs: 50
   lr: 1.0e-4
   weight_decay: 1.0e-5
   optimizer: adamw

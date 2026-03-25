@@ -21,6 +21,21 @@ def load_config(cfg_path: str) -> dict:
         return yaml.safe_load(f)
 
 
+def init_metric_sums():
+    return {
+        "dice_ex": 0.0,
+        "dice_he": 0.0,
+        "dice_ma": 0.0,
+        "dice_od": 0.0,
+        "dice_mean": 0.0,
+        "iou_ex": 0.0,
+        "iou_he": 0.0,
+        "iou_ma": 0.0,
+        "iou_od": 0.0,
+        "iou_mean": 0.0,
+    }
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--cfg_path", type=str, default="configs/base.yaml")
@@ -68,14 +83,7 @@ def main():
     model.eval()
 
     total_loss = 0.0
-    total_metrics = {
-        "dice_ex": 0.0,
-        "dice_he": 0.0,
-        "dice_mean": 0.0,
-        "iou_ex": 0.0,
-        "iou_he": 0.0,
-        "iou_mean": 0.0,
-    }
+    total_metrics = init_metric_sums()
     count = 0
 
     threshold = float(cfg["data"]["threshold"])

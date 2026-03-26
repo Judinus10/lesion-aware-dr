@@ -169,6 +169,33 @@ def plot_confusion_matrix(cm: np.ndarray, out_path: str, class_names=None):
     plt.close()
 
 
+def predict_with_rule(
+    logits: torch.Tensor,
+    prediction_rule: str = "raw_logits_argmax",
+    class1_threshold: float = 0.20,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    probs = torch.softmax(logits, dim=1)
+
+    if prediction_rule == "raw_logits_argmax":
+        pred = torch.argmax(logits, dim=1)
+
+    elif prediction_rule == "class1_threshold":
+        pred = torch.argmax(probs, dim=1)
+
+        # Force class 1 if its probability is above threshold
+        class1_mask = probs[:, 1] >= class1_threshold
+        pred = pred.clone()
+        pred[class1_mask] = 1
+
+    else:
+        raise ValueError(
+            f"Unknown prediction_rule='{prediction_rule}'. "
+            f"Use 'raw_logits_argmax' or 'class1_threshold'."
+        )
+
+    return pred, probs
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--cfg_path", type=str, required=True)
@@ -176,6 +203,22 @@ def main():
     ap.add_argument("--split", type=str, default="val", choices=["train", "val", "test"])
     ap.add_argument("--batch_size", type=int, default=32)
     ap.add_argument("--num_workers", type=int, default=2)
+
+    # NEW
+    ap.add_argument(
+        "--prediction_rule",
+        type=str,
+        default="raw_logits_argmax",
+        choices=["raw_logits_argmax", "class1_threshold"],
+        help="Prediction rule used during evaluation.",
+    )
+    ap.add_argument(
+        "--class1_threshold",
+        type=float,
+        default=0.20,
+        help="Threshold for forcing class 1 when using prediction_rule=class1_threshold.",
+    )
+
     args = ap.parse_args()
 
     cfg = load_cfg(args.cfg_path)
@@ -211,7 +254,13 @@ def main():
         args.ckpt_path = str(Path(ckpt_dir) / "best_macro_f1_model.pt")
 
     ckpt_name = Path(args.ckpt_path).stem
-    eval_dir = Path(outputs_dir) / "eval" / f"{args.split}_{ckpt_name}"
+
+    if args.prediction_rule == "class1_threshold":
+        eval_name = f"{args.split}_{ckpt_name}_{args.prediction_rule}_{args.class1_threshold:.2f}"
+    else:
+        eval_name = f"{args.split}_{ckpt_name}_{args.prediction_rule}"
+
+    eval_dir = Path(outputs_dir) / "eval" / eval_name
     eval_dir.mkdir(parents=True, exist_ok=True)
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -221,7 +270,9 @@ def main():
     print(f"[EVAL] image_dir: {image_dir}")
     print(f"[EVAL] ckpt: {args.ckpt_path}")
     print(f"[EVAL] loss_name: {loss_name}")
-    print("[EVAL] prediction_rule: raw_logits_argmax")
+    print(f"[EVAL] prediction_rule: {args.prediction_rule}")
+    if args.prediction_rule == "class1_threshold":
+        print(f"[EVAL] class1_threshold: {args.class1_threshold:.2f}")
 
     tfm = build_transform(image_size)
     ds = DRCSVDataset(
@@ -262,8 +313,11 @@ def main():
             else:
                 logits = model(x)
 
-            probs = torch.softmax(logits, dim=1)
-            pred = torch.argmax(logits, dim=1)
+            pred, probs = predict_with_rule(
+                logits=logits,
+                prediction_rule=args.prediction_rule,
+                class1_threshold=args.class1_threshold,
+            )
 
             y_true.extend(y.cpu().numpy().tolist())
             y_pred.extend(pred.cpu().numpy().tolist())
@@ -293,7 +347,8 @@ def main():
         "image_dir": image_dir,
         "backbone": backbone,
         "loss_name": loss_name,
-        "prediction_rule": "raw_logits_argmax",
+        "prediction_rule": args.prediction_rule,
+        "class1_threshold": args.class1_threshold if args.prediction_rule == "class1_threshold" else None,
     }
     (eval_dir / "metrics.json").write_text(json.dumps(metrics, indent=2), encoding="utf-8")
 

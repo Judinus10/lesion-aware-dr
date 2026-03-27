@@ -15,7 +15,7 @@ model:
 
 data:
   use_dummy: false
-  image_size: 224
+  image_size: 384
 
   # --------------------------------------------------
   # Current training inputs (used by datamodule/train)

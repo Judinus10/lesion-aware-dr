@@ -115,7 +115,7 @@ logging:
 loss:
   name: "cb_focal"
   beta: 0.999
-  gamma: 1.5
+  gamma: 2.5
   alpha_mode: "effective"
   reduction: "mean"
   use_class_weights: false

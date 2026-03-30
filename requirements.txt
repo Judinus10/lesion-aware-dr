@@ -15,3 +15,5 @@ timm
 torchmetrics
 tqdm
 wandb
+segmentation-models-pytorch
+reportlab

@@ -1,0 +1,26 @@
+{
+  "case_id": "20260330_144828_433269",
+  "saved_at": "2026-03-30T14:48:30",
+  "analysis_input_mode": "single",
+  "primary_eye": "right",
+  "available_eyes": [
+    "right"
+  ],
+  "eyes": {
+    "right": {
+      "pred_idx": 0,
+      "pred_name": "No DR (0)",
+      "probs": [
+        0.6237680912017822,
+        0.3670753836631775,
+        0.009142471477389336,
+        1.20610138765187e-05,
+        2.0027368918817956e-06
+      ],
+      "uploaded_name": "10004_left.png",
+      "raw_file": "right_raw.png",
+      "input_tensor_file": "right_input.npy"
+    }
+  },
+  "summary": "Right: No DR (0)"
+}

@@ -83,10 +83,8 @@ with left:
     with bcol:
         st.markdown("### Actions")
 
-        # Optional: allow user to choose target layer quality
-        # We'll populate conv layers after model loads
+        # Load model once so we can optionally show advanced layer settings
         try:
-            # Load model (cache via Streamlit wrapper below)
             @st.cache_resource
             def _cached_model():
                 return utils.load_model_cached()
@@ -98,14 +96,21 @@ with left:
             st.error(str(e))
             st.stop()
 
-        if layer_names:
-            picked = st.selectbox(
-                "Grad-CAM Target Layer (optional)",
-                options=["(auto)"] + layer_names,
-                index=0,
-                help="Auto is usually fine. Picking a slightly earlier conv can reduce border bias sometimes.",
-            )
-            st.session_state.preferred_layer = None if picked == "(auto)" else picked
+        # Hide technical layer selection inside advanced settings
+        with st.expander("Advanced Settings"):
+            st.caption("Use these only for research/debugging. Auto is recommended.")
+
+            if layer_names:
+                picked = st.selectbox(
+                    "Grad-CAM Target Layer",
+                    options=["(auto)"] + layer_names,
+                    index=0,
+                    help="Auto is usually best. Manual layer choice is mainly for explainability experiments.",
+                )
+                st.session_state.preferred_layer = None if picked == "(auto)" else picked
+            else:
+                st.session_state.preferred_layer = None
+                st.caption("No Conv2D layers detected.")
 
         st.markdown("")
 

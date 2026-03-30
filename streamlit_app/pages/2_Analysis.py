@@ -50,9 +50,17 @@ if "analysis_target_class" not in st.session_state:
 if "analysis_alpha" not in st.session_state:
     st.session_state.analysis_alpha = 0.45
 if "analysis_target_layer" not in st.session_state:
-    st.session_state.analysis_target_layer = "(auto)"
+    st.session_state.analysis_target_layer = "(auto)" if default_layer is None else default_layer
 if "analysis_cam_method" not in st.session_state:
     st.session_state.analysis_cam_method = "GradCAM++"
+
+# Build layer list first
+convs = utils.list_conv2d_layers(model)
+layer_names = [n for n, _ in convs] if convs else []
+
+# Safety: if stored layer is invalid, reset it
+if st.session_state.analysis_target_layer != "(auto)" and st.session_state.analysis_target_layer not in layer_names:
+    st.session_state.analysis_target_layer = "(auto)"
 
 # Read controls from session
 target_class = int(st.session_state.analysis_target_class)
@@ -61,9 +69,6 @@ picked_layer = st.session_state.analysis_target_layer
 cam_method_ui = st.session_state.analysis_cam_method
 cam_method = "gradcampp" if cam_method_ui == "GradCAM++" else "scorecam"
 
-# Build preferred layer name
-convs = utils.list_conv2d_layers(model)
-layer_names = [n for n, _ in convs] if convs else []
 preferred = None if picked_layer == "(auto)" else picked_layer
 
 # ---------------------------
@@ -179,31 +184,31 @@ with right:
     st.selectbox(
         "Generate heatmap for class",
         options=list(range(utils.NUM_CLASSES)),
-        index=int(target_class),
         format_func=lambda i: utils.CLASS_NAMES[i],
         key="analysis_target_class",
     )
 
     st.slider(
         "Overlay strength",
-        0.10, 0.80, float(alpha), 0.05,
+        min_value=0.10,
+        max_value=0.80,
+        step=0.05,
         key="analysis_alpha",
     )
 
-    if layer_names:
-        default_index = 0
-        if picked_layer != "(auto)" and picked_layer in layer_names:
-            default_index = layer_names.index(picked_layer) + 1
+    with st.expander("Advanced Settings"):
+        st.caption("Use these only for research/debugging. Auto is recommended.")
 
-        st.selectbox(
-            "Target layer",
-            options=["(auto)"] + layer_names,
-            index=default_index,
-            key="analysis_target_layer",
-        )
-    else:
-        st.session_state.analysis_target_layer = "(auto)"
-        st.caption("No Conv2D layers detected.")
+        if layer_names:
+            st.selectbox(
+                "Target layer",
+                options=["(auto)"] + layer_names,
+                key="analysis_target_layer",
+                help="Manual layer selection is mainly for explainability experiments.",
+            )
+        else:
+            st.session_state.analysis_target_layer = "(auto)"
+            st.caption("No Conv2D layers detected.")
 
     st.markdown("---")
     st.subheader("Saved Cases")

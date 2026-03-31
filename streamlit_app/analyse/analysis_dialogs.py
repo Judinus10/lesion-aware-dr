@@ -47,8 +47,8 @@ def inject_save_dialog_error_styles():
             font-weight: 500;
         }
 
-        .save-form-stack-gap {
-            margin-bottom: -0.4rem;
+        .save-field-wrap {
+            margin-bottom: 0.1rem;
         }
 
         div[data-testid="stTextInput"] input {
@@ -191,8 +191,8 @@ def render_save_case_dialog(analysis_input_mode: str, primary_eye: str):
 
         with row1_col1:
             patient_id_class = "missing-patient-id" if "Patient ID" in missing_fields else ""
-            st.markdown(f'<div class="{patient_id_class}">', unsafe_allow_html=True)
-            st.text_input("Patient ID", key="save_patient_id")
+            st.markdown(f'<div class="{patient_id_class} save-field-wrap">', unsafe_allow_html=True)
+            st.text_input("Patient ID *", key="save_patient_id")
             st.markdown("</div>", unsafe_allow_html=True)
             if "Patient ID" in missing_fields:
                 st.markdown(
@@ -202,7 +202,7 @@ def render_save_case_dialog(analysis_input_mode: str, primary_eye: str):
 
         with row1_col2:
             gender_class = "missing-gender" if "Gender" in missing_fields else ""
-            st.markdown(f'<div class="{gender_class}">', unsafe_allow_html=True)
+            st.markdown(f'<div class="{gender_class} save-field-wrap">', unsafe_allow_html=True)
             st.selectbox(
                 "Gender",
                 options=["", "Male", "Female", "Other"],
@@ -215,12 +215,12 @@ def render_save_case_dialog(analysis_input_mode: str, primary_eye: str):
                     unsafe_allow_html=True,
                 )
 
-        # ---------- ROWS 2 & 3 : Patient Name | Notes  /  Age | Notes ----------
-        row23_col1, row23_col2 = st.columns([1, 1], gap="small")
+        # ---------- ROW 2 : Patient Name | Age ----------
+        row2_col1, row2_col2 = st.columns([1, 1], gap="small")
 
-        with row23_col1:
+        with row2_col1:
             patient_name_class = "missing-patient-name" if "Patient Name" in missing_fields else ""
-            st.markdown(f'<div class="{patient_name_class} save-form-stack-gap">', unsafe_allow_html=True)
+            st.markdown(f'<div class="{patient_name_class} save-field-wrap">', unsafe_allow_html=True)
             st.text_input("Patient Name", key="save_patient_name")
             st.markdown("</div>", unsafe_allow_html=True)
             if "Patient Name" in missing_fields:
@@ -229,8 +229,9 @@ def render_save_case_dialog(analysis_input_mode: str, primary_eye: str):
                     unsafe_allow_html=True,
                 )
 
+        with row2_col2:
             age_class = "missing-age" if "Age" in missing_fields else ""
-            st.markdown(f'<div class="{age_class} save-form-stack-gap">', unsafe_allow_html=True)
+            st.markdown(f'<div class="{age_class} save-field-wrap">', unsafe_allow_html=True)
             st.text_input("Age", key="save_patient_age")
             st.markdown("</div>", unsafe_allow_html=True)
             if "Age" in missing_fields:
@@ -239,8 +240,8 @@ def render_save_case_dialog(analysis_input_mode: str, primary_eye: str):
                     unsafe_allow_html=True,
                 )
 
-        with row23_col2:
-            st.text_area("Notes", key="save_patient_notes", height=120)
+        # ---------- ROW 3 : Notes ----------
+        st.text_area("Notes", key="save_patient_notes", height=110)
 
         st.markdown("---")
         b1, b2 = st.columns(2)
@@ -287,21 +288,40 @@ def render_pdf_report_dialog(
 ):
     @st.dialog("PDF Report Options")
     def _dialog():
+        # ---------- DEFAULT PDF CHECKBOX STATES ----------
+        st.session_state.setdefault("pdf_include_report_details", True)
+        st.session_state.setdefault("pdf_include_prediction_summary", True)
+        st.session_state.setdefault("pdf_include_probabilities", True)
+        st.session_state.setdefault("pdf_include_disclaimer", True)
+
+        st.session_state.setdefault("pdf_include_original_image", False)
+        st.session_state.setdefault("pdf_include_gradcam_heatmap", False)
+        st.session_state.setdefault("pdf_include_gradcam_overlay", False)
+        st.session_state.setdefault("pdf_include_exudates_mask", False)
+        st.session_state.setdefault("pdf_include_exudates_overlay", False)
+        st.session_state.setdefault("pdf_include_haemorrhages_mask", False)
+        st.session_state.setdefault("pdf_include_haemorrhages_overlay", False)
+
         st.write("Choose what should be included in the report before generating the PDF.")
 
         st.text_input("Report title", key="pdf_report_title")
-        c1, c2 = st.columns(2)
-        with c1:
+
+        row1_col1, row1_col2 = st.columns([1, 1], gap="small")
+        with row1_col1:
             st.text_input("Patient name", key="pdf_patient_name")
-            st.text_input("Patient ID", key="pdf_patient_id")
-        with c2:
+        with row1_col2:
             st.text_input("Clinician / Examiner", key="pdf_clinician_name")
+
+        row2_col1, row2_col2 = st.columns([1, 1], gap="small")
+        with row2_col1:
+            st.text_input("Patient ID", key="pdf_patient_id")
+        with row2_col2:
             st.text_input("Institution", key="pdf_institution_name")
 
-        st.text_area("Notes", key="pdf_notes", height=80)
+        st.text_area("Notes", key="pdf_notes", height=100)
 
         st.markdown("### Include sections")
-        s1, s2 = st.columns(2)
+        s1, s2 = st.columns([1, 1], gap="large")
         with s1:
             st.checkbox("Report details", key="pdf_include_report_details")
             st.checkbox("Prediction summary", key="pdf_include_prediction_summary")

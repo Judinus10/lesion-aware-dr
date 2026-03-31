@@ -23,28 +23,120 @@ def toast_info(message: str):
     st.toast(message, icon="ℹ️")
 
 
+def inject_save_dialog_error_styles():
+    st.markdown(
+        """
+        <style>
+        .save-form-error-text {
+            color: #f87171;
+            font-size: 0.84rem;
+            font-weight: 600;
+            margin-top: -0.35rem;
+            margin-bottom: 0.25rem;
+        }
+
+        .save-form-warning-box {
+            background: rgba(127, 29, 29, 0.18);
+            border: 1px solid rgba(248, 113, 113, 0.55);
+            color: #fecaca;
+            border-radius: 12px;
+            padding: 0.8rem 0.95rem;
+            margin-bottom: 0.8rem;
+            line-height: 1.5;
+            font-size: 0.95rem;
+            font-weight: 500;
+        }
+
+        .save-form-stack-gap {
+            margin-bottom: -0.4rem;
+        }
+
+        div[data-testid="stTextInput"] input {
+            border-radius: 10px;
+        }
+
+        .missing-patient-id div[data-testid="stTextInput"] input,
+        .missing-patient-name div[data-testid="stTextInput"] input,
+        .missing-age div[data-testid="stTextInput"] input {
+            border: 1.5px solid #ef4444 !important;
+            box-shadow: 0 0 0 1px #ef4444 !important;
+        }
+
+        div[data-testid="stSelectbox"] div[data-baseweb="select"] > div {
+            border-radius: 10px;
+        }
+
+        .missing-gender div[data-testid="stSelectbox"] div[data-baseweb="select"] > div {
+            border: 1.5px solid #ef4444 !important;
+            box-shadow: 0 0 0 1px #ef4444 !important;
+        }
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
+def normalize_text(value) -> str:
+    return str(value or "").strip()
+
+
+def validate_save_case_inputs() -> dict:
+    patient_id = normalize_text(st.session_state.get("save_patient_id", ""))
+    patient_name = normalize_text(st.session_state.get("save_patient_name", ""))
+    age = normalize_text(st.session_state.get("save_patient_age", ""))
+    gender = normalize_text(st.session_state.get("save_patient_gender", ""))
+
+    errors = {
+        "patient_id": not bool(patient_id),
+        "patient_name": not bool(patient_name),
+        "age": not bool(age),
+        "gender": not bool(gender),
+    }
+
+    return {
+        "patient_id": patient_id,
+        "patient_name": patient_name,
+        "age": age,
+        "gender": gender,
+        "notes": normalize_text(st.session_state.get("save_patient_notes", "")),
+        "errors": errors,
+        "missing_fields": [
+            label
+            for key, label in [
+                ("patient_id", "Patient ID"),
+                ("patient_name", "Patient Name"),
+                ("age", "Age"),
+                ("gender", "Gender"),
+            ]
+            if errors[key]
+        ],
+    }
+
+
 def save_current_case(analysis_input_mode: str, primary_eye: str):
-    patient_id = st.session_state.save_patient_id.strip()
-    if not patient_id:
-        raise ValueError("Patient ID is required.")
+    data = validate_save_case_inputs()
+
+    if data["missing_fields"]:
+        missing_text = ", ".join(data["missing_fields"])
+        raise ValueError(f"Please enter the missing data: {missing_text}.")
 
     saved = save_case_bundle(
         eye_results=st.session_state.eye_results,
         analysis_input_mode=analysis_input_mode,
         primary_eye=primary_eye,
-        patient_id=patient_id,
-        patient_name=st.session_state.save_patient_name.strip(),
-        age=st.session_state.save_patient_age.strip(),
-        gender=st.session_state.save_patient_gender.strip(),
-        notes=st.session_state.save_patient_notes.strip(),
+        patient_id=data["patient_id"],
+        patient_name=data["patient_name"],
+        age=data["age"],
+        gender=data["gender"],
+        notes=data["notes"],
         max_cases=5,
     )
 
-    st.session_state.saved_patient_id = st.session_state.save_patient_id
-    st.session_state.saved_patient_name = st.session_state.save_patient_name
-    st.session_state.saved_patient_age = st.session_state.save_patient_age
-    st.session_state.saved_patient_gender = st.session_state.save_patient_gender
-    st.session_state.saved_patient_notes = st.session_state.save_patient_notes
+    st.session_state.saved_patient_id = data["patient_id"]
+    st.session_state.saved_patient_name = data["patient_name"]
+    st.session_state.saved_patient_age = data["age"]
+    st.session_state.saved_patient_gender = data["gender"]
+    st.session_state.saved_patient_notes = data["notes"]
 
     return saved
 
@@ -74,20 +166,81 @@ def current_pdf_options():
 def render_save_case_dialog(analysis_input_mode: str, primary_eye: str):
     @st.dialog("Save Case")
     def _dialog():
+        inject_save_dialog_error_styles()
+
+        if "save_case_missing_fields" not in st.session_state:
+            st.session_state.save_case_missing_fields = []
+
         st.write("Enter patient details before saving this case. Patient ID is required.")
 
-        col1, col2 = st.columns(2)
-        with col1:
-            st.text_input("Patient ID *", key="save_patient_id")
-            st.text_input("Patient Name", key="save_patient_name")
-            st.text_input("Age", key="save_patient_age")
-        with col2:
+        missing_fields = st.session_state.get("save_case_missing_fields", [])
+
+        if missing_fields:
+            st.markdown(
+                f"""
+                <div class="save-form-warning-box">
+                    Missing required data: {", ".join(missing_fields)}.<br>
+                    Fill the highlighted fields and try again.
+                </div>
+                """,
+                unsafe_allow_html=True,
+            )
+
+        # ---------- ROW 1 : Patient ID | Gender ----------
+        row1_col1, row1_col2 = st.columns([1, 1], gap="small")
+
+        with row1_col1:
+            patient_id_class = "missing-patient-id" if "Patient ID" in missing_fields else ""
+            st.markdown(f'<div class="{patient_id_class}">', unsafe_allow_html=True)
+            st.text_input("Patient ID", key="save_patient_id")
+            st.markdown("</div>", unsafe_allow_html=True)
+            if "Patient ID" in missing_fields:
+                st.markdown(
+                    '<div class="save-form-error-text">Patient ID is required.</div>',
+                    unsafe_allow_html=True,
+                )
+
+        with row1_col2:
+            gender_class = "missing-gender" if "Gender" in missing_fields else ""
+            st.markdown(f'<div class="{gender_class}">', unsafe_allow_html=True)
             st.selectbox(
                 "Gender",
                 options=["", "Male", "Female", "Other"],
                 key="save_patient_gender",
             )
-            st.text_area("Notes", key="save_patient_notes", height=110)
+            st.markdown("</div>", unsafe_allow_html=True)
+            if "Gender" in missing_fields:
+                st.markdown(
+                    '<div class="save-form-error-text">Gender is required.</div>',
+                    unsafe_allow_html=True,
+                )
+
+        # ---------- ROWS 2 & 3 : Patient Name | Notes  /  Age | Notes ----------
+        row23_col1, row23_col2 = st.columns([1, 1], gap="small")
+
+        with row23_col1:
+            patient_name_class = "missing-patient-name" if "Patient Name" in missing_fields else ""
+            st.markdown(f'<div class="{patient_name_class} save-form-stack-gap">', unsafe_allow_html=True)
+            st.text_input("Patient Name", key="save_patient_name")
+            st.markdown("</div>", unsafe_allow_html=True)
+            if "Patient Name" in missing_fields:
+                st.markdown(
+                    '<div class="save-form-error-text">Patient Name is required.</div>',
+                    unsafe_allow_html=True,
+                )
+
+            age_class = "missing-age" if "Age" in missing_fields else ""
+            st.markdown(f'<div class="{age_class} save-form-stack-gap">', unsafe_allow_html=True)
+            st.text_input("Age", key="save_patient_age")
+            st.markdown("</div>", unsafe_allow_html=True)
+            if "Age" in missing_fields:
+                st.markdown(
+                    '<div class="save-form-error-text">Age is required.</div>',
+                    unsafe_allow_html=True,
+                )
+
+        with row23_col2:
+            st.text_area("Notes", key="save_patient_notes", height=120)
 
         st.markdown("---")
         b1, b2 = st.columns(2)
@@ -95,18 +248,32 @@ def render_save_case_dialog(analysis_input_mode: str, primary_eye: str):
         with b1:
             if st.button("Confirm Save", key="confirm_save_case_btn", use_container_width=True):
                 try:
+                    if "eye_results" not in st.session_state or not st.session_state.eye_results:
+                        toast_error("No analysis result found to save.")
+                        return
+
+                    data = validate_save_case_inputs()
+
+                    if data["missing_fields"]:
+                        st.session_state.save_case_missing_fields = data["missing_fields"]
+                        toast_warning("Enter the missing required data before saving.")
+                        st.rerun()
+
                     saved = save_current_case(analysis_input_mode, primary_eye)
+                    st.session_state.save_case_missing_fields = []
                     st.session_state.show_save_case_dialog = False
                     st.session_state.analysis_page_toast = {
                         "level": "success",
                         "message": f"Saved. Patient ID: {saved['patient_id']} | {saved['summary']}",
                     }
                     st.rerun()
+
                 except Exception as e:
                     toast_error(str(e))
 
         with b2:
             if st.button("Close", key="close_save_case_btn", use_container_width=True):
+                st.session_state.save_case_missing_fields = []
                 st.session_state.show_save_case_dialog = False
                 st.rerun()
 

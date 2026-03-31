@@ -1,10 +1,7 @@
-import os
 import streamlit as st
-import torch
 from PIL import Image
 
 import utils_classification as cls_utils
-import utils_segmentation as seg_utils
 
 
 st.set_page_config(page_title="Dashboard", layout="wide")
@@ -32,8 +29,6 @@ if "last_uploaded_name" not in st.session_state:
     st.session_state.last_uploaded_name = ""
 if "last_uploaded_names" not in st.session_state:
     st.session_state.last_uploaded_names = {"right": "", "left": ""}
-if "preferred_layer" not in st.session_state:
-    st.session_state.preferred_layer = None
 if "single_eye_confirm_pending" not in st.session_state:
     st.session_state.single_eye_confirm_pending = False
 if "single_eye_target" not in st.session_state:
@@ -44,6 +39,58 @@ if "single_eye_target" not in st.session_state:
 @st.cache_resource
 def _cached_cls_model():
     return cls_utils.load_model_cached()
+
+
+def show_center_loader(message="Preparing analysis..."):
+    loader = st.empty()
+    loader.markdown(
+        f"""
+        <div style="
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            min-height: 260px;
+            width: 100%;
+        ">
+            <div style="
+                display: flex;
+                align-items: center;
+                gap: 12px;
+                padding: 18px 26px;
+                border-radius: 14px;
+                background: rgba(255,255,255,0.02);
+                border: 1px solid rgba(255,255,255,0.08);
+                font-size: 20px;
+                font-weight: 500;
+            ">
+                <div class="custom-loader"></div>
+                <span>{message}</span>
+            </div>
+        </div>
+
+        <style>
+        .custom-loader {{
+            width: 22px;
+            height: 22px;
+            border: 3px solid rgba(255,255,255,0.18);
+            border-top: 3px solid rgba(255,255,255,0.95);
+            border-radius: 50%;
+            animation: spin 0.9s linear infinite;
+        }}
+
+        @keyframes spin {{
+            0% {{ transform: rotate(0deg); }}
+            100% {{ transform: rotate(360deg); }}
+        }}
+        </style>
+        """,
+        unsafe_allow_html=True,
+    )
+    return loader
+
+
+def clear_loader(loader):
+    loader.empty()
 
 
 def reset_single_eye_confirmation():
@@ -91,7 +138,7 @@ def run_prediction_and_switch(right_img, left_img, model, device):
     if len(available_eyes) == 2:
         st.session_state.analysis_input_mode = "pair"
         st.session_state.primary_eye = "right"
-        st.session_state.last_result = eye_results["right"]  # backward compatibility
+        st.session_state.last_result = eye_results["right"]
         st.session_state.last_uploaded_name = st.session_state.last_uploaded_names.get("right", "")
     else:
         only_eye = available_eyes[0]
@@ -105,34 +152,19 @@ def run_prediction_and_switch(right_img, left_img, model, device):
 
 
 # ---- Header ----
-st.title("Lesion-Aware DR Prediction System")
-st.caption("Multi-model student research demo: DR grading + explainability + lesion segmentation")
-
-# ---- Top status row ----
-cols = st.columns(5)
-
-device_text = "CUDA ✅" if torch.cuda.is_available() else "CPU"
-
-with cols[0]:
-    st.metric("Device", device_text)
-
-with cols[1]:
-    st.metric("Classification Model", cls_utils.MODEL_NAME)
-
-with cols[2]:
-    st.metric("Segmentation Model", seg_utils.SEG_MODEL_NAME)
-
-with cols[3]:
-    st.metric(
-        "Cls Checkpoint",
-        "Found ✅" if os.path.exists(cls_utils.CKPT_PATH) else "Missing ❌"
-    )
-
-with cols[4]:
-    st.metric(
-        "Seg Checkpoint",
-        "Found ✅" if os.path.exists(seg_utils.SEG_CKPT_PATH) else "Missing ❌"
-    )
+st.markdown(
+    """
+    <div style='text-align: center; padding-top: 10px; padding-bottom: 10px;'>
+        <h1 style='margin-bottom: 5px; text-align: center;'>
+            Lesion-Aware DR Prediction System
+        </h1>
+        <p style='font-size:16px; color: #9CA3AF; text-align: center; margin-bottom: 0;'>
+            Multi-model student research demo: DR grading + explainability + lesion segmentation
+        </p>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
 
 st.divider()
 
@@ -152,7 +184,7 @@ with right:
     )
 
     st.markdown("---")
-    if st.button("🗂 View Saved Cases", use_container_width=True):
+    if st.button("View Saved Cases", key="view_saved_cases_btn", use_container_width=True):
         st.switch_page("pages/3_Saved_Cases.py")
 
 with left:
@@ -182,7 +214,6 @@ with left:
         "left": uploaded_left.name if uploaded_left else "",
     }
 
-    # If upload state changed, kill old pending single-eye confirmation
     current_uploaded_count = int(right_img is not None) + int(left_img is not None)
     if current_uploaded_count != 1:
         reset_single_eye_confirmation()
@@ -194,7 +225,9 @@ with left:
     # ---- Preview ----
     st.markdown("### Preview")
 
-    if right_img is not None and left_img is not None:
+    both_uploaded = right_img is not None and left_img is not None
+
+    if both_uploaded:
         pc1, pc2 = st.columns(2, gap="large")
         with pc1:
             st.markdown("#### Right Eye")
@@ -203,91 +236,112 @@ with left:
             st.markdown("#### Left Eye")
             st.image(left_img, use_container_width=True)
 
-    elif right_img is not None:
-        pc1, pc2 = st.columns([1.4, 1.0], gap="large")
-        with pc1:
-            st.markdown("#### Right Eye")
-            st.image(right_img, use_container_width=True)
+        st.markdown("<div style='height: 20px;'></div>", unsafe_allow_html=True)
+
+        _, action_center, _ = st.columns([1, 2, 1])
+        with action_center:
+            try:
+                model, device = _cached_cls_model()
+            except Exception as e:
+                st.error(str(e))
+                st.stop()
+
+            predict_clicked = st.button(
+                "Predict & Analyze",
+                key="predict_analyze_pair",
+                type="primary",
+                use_container_width=True,
+            )
+
+            if predict_clicked:
+                loader = show_center_loader("Preparing paired-eye analysis...")
+                run_prediction_and_switch(right_img, left_img, model, device)
+                clear_loader(loader)
+
     else:
-        pc1, pc2 = st.columns([1.4, 1.0], gap="large")
-        with pc1:
-            st.markdown("#### Left Eye")
-            st.image(left_img, use_container_width=True)
+        if right_img is not None:
+            pc1, pc2 = st.columns([1.4, 1.0], gap="large")
+            with pc1:
+                st.markdown("#### Right Eye")
+                st.image(right_img, use_container_width=True)
+        else:
+            pc1, pc2 = st.columns([1.4, 1.0], gap="large")
+            with pc1:
+                st.markdown("#### Left Eye")
+                st.image(left_img, use_container_width=True)
 
-    # ---- Actions ----
-    with pc2:
-        st.markdown("### Actions")
+        with pc2:
+            st.markdown("### Actions")
 
-        try:
-            model, device = _cached_cls_model()
-            convs = cls_utils.list_conv2d_layers(model)
-            layer_names = [n for n, _ in convs] if convs else []
-        except Exception as e:
-            st.error(str(e))
-            st.stop()
+            try:
+                model, device = _cached_cls_model()
+            except Exception as e:
+                st.error(str(e))
+                st.stop()
 
-        with st.expander("Advanced Settings"):
-            st.caption("Use this only for explainability experiments. Auto is recommended.")
+            predict_clicked = st.button(
+                "Predict & Analyze",
+                key="predict_analyze_single",
+                type="primary",
+                use_container_width=True,
+            )
 
-            if layer_names:
-                picked = st.selectbox(
-                    "Grad-CAM Target Layer",
-                    options=["(auto)"] + layer_names,
-                    index=0,
-                    help="Manual layer selection is for research/debugging. Normal users should leave this on auto.",
-                )
-                st.session_state.preferred_layer = None if picked == "(auto)" else picked
-            else:
-                st.session_state.preferred_layer = None
-                st.caption("No Conv2D layers detected.")
-
-        st.markdown("")
-
-        predict_clicked = st.button("🔍 Predict & Analyze", type="primary", use_container_width=True)
-
-        if predict_clicked:
-            if right_img is not None and left_img is not None:
-                with st.spinner("Running paired-eye prediction…"):
-                    run_prediction_and_switch(right_img, left_img, model, device)
-
-            else:
+            if predict_clicked:
                 single_side = "right" if right_img is not None else "left"
                 st.session_state.single_eye_confirm_pending = True
                 st.session_state.single_eye_target = single_side
 
-        if st.session_state.single_eye_confirm_pending:
-            target_side = st.session_state.single_eye_target
+            if st.session_state.single_eye_confirm_pending:
+                target_side = st.session_state.single_eye_target
 
-            if target_side == "right" and right_img is not None:
-                st.warning(
-                    f"Only the Right eye image was uploaded "
-                    f"({st.session_state.last_uploaded_names.get('right', 'right_eye')}). "
-                    f"Do you want to continue with single-eye prediction?"
-                )
+                if target_side == "right" and right_img is not None:
+                    st.warning(
+                        f"Only the Right eye image was uploaded "
+                        f"({st.session_state.last_uploaded_names.get('right', 'right_eye')}). "
+                        f"Do you want to continue with single-eye prediction?"
+                    )
 
-                c1, c2 = st.columns(2, gap="small")
-                with c1:
-                    if st.button("✅ Continue", key="confirm_single_right", use_container_width=True):
-                        with st.spinner("Running single-eye prediction…"):
+                    c1, c2 = st.columns(2, gap="small")
+                    with c1:
+                        if st.button(
+                            "Continue",
+                            key="confirm_single_right",
+                            use_container_width=True,
+                        ):
+                            loader = show_center_loader("Preparing single-eye analysis...")
                             run_prediction_and_switch(right_img, None, model, device)
+                            clear_loader(loader)
 
-                with c2:
-                    if st.button("✖ Cancel", key="cancel_single_right", use_container_width=True):
-                        reset_single_eye_confirmation()
+                    with c2:
+                        if st.button(
+                            "Cancel",
+                            key="cancel_single_right",
+                            use_container_width=True,
+                        ):
+                            reset_single_eye_confirmation()
 
-            elif target_side == "left" and left_img is not None:
-                st.warning(
-                    f"Only the Left eye image was uploaded "
-                    f"({st.session_state.last_uploaded_names.get('left', 'left_eye')}). "
-                    f"Do you want to continue with single-eye prediction?"
-                )
+                elif target_side == "left" and left_img is not None:
+                    st.warning(
+                        f"Only the Left eye image was uploaded "
+                        f"({st.session_state.last_uploaded_names.get('left', 'left_eye')}). "
+                        f"Do you want to continue with single-eye prediction?"
+                    )
 
-                c1, c2 = st.columns(2, gap="small")
-                with c1:
-                    if st.button("✅ Continue", key="confirm_single_left", use_container_width=True):
-                        with st.spinner("Running single-eye prediction…"):
+                    c1, c2 = st.columns(2, gap="small")
+                    with c1:
+                        if st.button(
+                            "Continue",
+                            key="confirm_single_left",
+                            use_container_width=True,
+                        ):
+                            loader = show_center_loader("Preparing single-eye analysis...")
                             run_prediction_and_switch(None, left_img, model, device)
+                            clear_loader(loader)
 
-                with c2:
-                    if st.button("✖ Cancel", key="cancel_single_left", use_container_width=True):
-                        reset_single_eye_confirmation()
+                    with c2:
+                        if st.button(
+                            "Cancel",
+                            key="cancel_single_left",
+                            use_container_width=True,
+                        ):
+                            reset_single_eye_confirmation()

@@ -1,243 +1,214 @@
-import json
-import streamlit as st
-import numpy as np
+import os
+import sys
 
-import utils
+import streamlit as st
+
+
+CURRENT_DIR = os.path.dirname(__file__)
+STREAMLIT_APP_DIR = os.path.abspath(os.path.join(CURRENT_DIR, ".."))
+if STREAMLIT_APP_DIR not in sys.path:
+    sys.path.insert(0, STREAMLIT_APP_DIR)
+
+from analyse.analysis_compute import (
+    compute_outputs_per_eye,
+    ensure_analysis_session_defaults,
+    get_available_eyes_and_primary,
+    get_cached_cls_model,
+    get_cached_seg_model,
+    prepare_eye_results_from_legacy,
+    validate_layer_names,
+)
+from analyse.analysis_components_saved_cases import render_saved_case_card
+from analyse.analysis_components_summary import render_eye_prediction_summary_two_col
+from analyse.analysis_components_views import (
+    render_ex_pair,
+    render_ex_single,
+    render_explainability_pair_vertical,
+    render_explainability_single,
+    render_eye_controls,
+    render_he_pair,
+    render_he_single,
+    render_original_pair,
+    render_original_single,
+)
+from analyse.analysis_dialogs import render_pdf_report_dialog, render_save_case_dialog
+from analyse.analysis_styles import apply_analysis_styles, clear_fixed_loader, show_fixed_loader
+from saved_cases_store import apply_case_to_session, list_saved_cases, load_case_bundle
+
 
 st.set_page_config(page_title="Analysis", layout="wide")
+apply_analysis_styles()
 
-# Hide sidebar nav
-st.markdown(
-    """
-    <style>
-      [data-testid="stSidebar"] {display: none;}
-      [data-testid="stSidebarNav"] {display: none;}
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
 
-# ---- Guard: require a prediction ----
-result = st.session_state.get("last_result", None)
-if result is None:
+def open_saved_case(patient_id: str, case_id: str):
+    loaded = load_case_bundle(patient_id, case_id)
+    apply_case_to_session(st.session_state, loaded)
+
+
+analysis_input_mode, eye_results = prepare_eye_results_from_legacy()
+
+if not eye_results:
     st.warning("No prediction found. Go back and run prediction first.")
-    if st.button("Go to Dashboard"):
+    if st.button("Go to Dashboard", key="analysis_go_dashboard_empty"):
         st.switch_page("pages/1_Dashboard.py")
     st.stop()
 
-# Load model
-@st.cache_resource
-def _cached_model():
-    return utils.load_model_cached()
+available_eyes, primary_eye, analysis_input_mode = get_available_eyes_and_primary(eye_results)
 
-model, device = _cached_model()
+if not available_eyes:
+    st.error("Prediction data is invalid.")
+    st.stop()
 
-# Pull stored prediction data
-pred_idx = int(result["pred_idx"])
-pred_name = result["pred_name"]
-probs = np.array(result["probs"], dtype=np.float32)
-raw_rgb = result["raw_rgb"]
-input_tensor = result["input_tensor"].to(device)
+cls_model, cls_device = get_cached_cls_model()
+seg_model, seg_device = get_cached_seg_model()
 
-filename_hint = st.session_state.get("last_uploaded_name", "fundus")
-default_layer = st.session_state.get("preferred_layer", None)
+ensure_analysis_session_defaults(eye_results)
+validate_layer_names(cls_model, available_eyes)
 
-# ---------------------------
-# Controls state
-# ---------------------------
-if "analysis_target_class" not in st.session_state:
-    st.session_state.analysis_target_class = pred_idx
-if "analysis_alpha" not in st.session_state:
-    st.session_state.analysis_alpha = 0.45
-if "analysis_target_layer" not in st.session_state:
-    st.session_state.analysis_target_layer = "(auto)" if default_layer is None else default_layer
-if "analysis_cam_method" not in st.session_state:
-    st.session_state.analysis_cam_method = "GradCAM++"
+loader = show_fixed_loader("Preparing multi-model analysis...")
 
-# Build layer list first
-convs = utils.list_conv2d_layers(model)
-layer_names = [n for n, _ in convs] if convs else []
+computed = compute_outputs_per_eye(
+    eye_results=eye_results,
+    available_eyes=available_eyes,
+    cls_model=cls_model,
+    cls_device=cls_device,
+    seg_model=seg_model,
+    seg_device=seg_device,
+)
 
-# Safety: if stored layer is invalid, reset it
-if st.session_state.analysis_target_layer != "(auto)" and st.session_state.analysis_target_layer not in layer_names:
-    st.session_state.analysis_target_layer = "(auto)"
+clear_fixed_loader(loader)
 
-# Read controls from session
-target_class = int(st.session_state.analysis_target_class)
-alpha = float(st.session_state.analysis_alpha)
-picked_layer = st.session_state.analysis_target_layer
-cam_method_ui = st.session_state.analysis_cam_method
-cam_method = "gradcampp" if cam_method_ui == "GradCAM++" else "scorecam"
-
-preferred = None if picked_layer == "(auto)" else picked_layer
-
-# ---------------------------
-# Compute CAM early
-# ---------------------------
-with st.spinner("Preparing analysis…"):
-    layer_name, layer_module = utils.choose_target_layer(model, preferred_name=preferred)
-    cam_mask = utils.run_cam(
-        model=model,
-        input_tensor=input_tensor,
-        target_class=int(target_class),
-        target_layer_module=layer_module,
-        method=cam_method,
-    )
-    overlay_rgb, heatmap_rgb = utils.overlay_heatmap(raw_rgb, cam_mask, alpha=float(alpha))
-
-# Prepare export JSON early
-export = {
-    "filename_hint": filename_hint,
-    "pred_idx": pred_idx,
-    "pred_name": pred_name,
-    "probs": [float(x) for x in probs.tolist()],
-    "target_class": int(target_class),
-    "target_layer": layer_name,
-    "cam_method": cam_method_ui,
-    "alpha": float(alpha),
-}
-
-# ---------------------------
-# TOP BAR
-# ---------------------------
 top_left, top_right = st.columns([3, 1], gap="large")
 
 with top_left:
-    if st.button("⬅ Back to Dashboard"):
+    if st.button("Back to Dashboard", key="analysis_back_dashboard_btn"):
         st.switch_page("pages/1_Dashboard.py")
 
 with top_right:
     b1, b2 = st.columns(2, gap="small")
 
     with b1:
-        if st.button("💾 Save", use_container_width=True):
-            record = utils.save_case(
-                filename_hint=filename_hint,
-                raw_rgb=raw_rgb,
-                heatmap_rgb=heatmap_rgb,
-                overlay_rgb=overlay_rgb,
-                pred_idx=pred_idx,
-                probs=probs,
-                target_class=int(target_class),
-                target_layer_name=layer_name,
-                cam_method=cam_method_ui,
-            )
-            st.success(f"Saved ✅ {record['case_id']}")
+        if st.button("Save Case", key="analysis_save_case_btn", use_container_width=True):
+            st.session_state.show_save_case_dialog = True
 
     with b2:
-        st.download_button(
-            "⬇ JSON",
-            data=json.dumps(export, indent=2),
-            file_name="dr_result.json",
-            mime="application/json",
-            use_container_width=True,
-        )
+        if st.button("PDF Report", key="analysis_pdf_report_btn", use_container_width=True):
+            st.session_state.show_pdf_dialog = True
+            st.session_state.generated_pdf_bytes = None
+            st.session_state.generated_pdf_name = None
 
-# Title
 st.title("Prediction Result")
 st.divider()
 
-# ---------------------------
-# Prediction Summary
-# ---------------------------
-sum1, sum2 = st.columns([1.1, 1.9], gap="large")
+if analysis_input_mode == "pair":
+    if "right" in computed:
+        render_eye_prediction_summary_two_col("right", computed["right"])
+        st.markdown("---")
 
-conf = float(probs[pred_idx])
-
-with sum1:
-    st.subheader("Predicted Grade")
-    st.metric("Prediction", pred_name)
-
-    st.write(f"**Confidence score:** {conf*100:.1f}%")
-    st.caption("Confidence = softmax probability of the predicted class.")
-    st.progress(min(max(conf, 0.0), 1.0))
-
-    if np.allclose(probs, probs[0], atol=1e-3):
-        st.error("All class probabilities are equal (model uncertainty / checkpoint issue).")
-    elif conf < 0.35:
-        st.warning("Low confidence. Treat this prediction as uncertain.")
-
-with sum2:
-    st.subheader("Class Probabilities (sorted)")
-    order = np.argsort(-probs)
-    for i in order:
-        st.write(f"**{utils.CLASS_NAMES[i]}** — {probs[i]*100:.1f}%")
-        st.progress(min(max(float(probs[i]), 0.0), 1.0))
+    if "left" in computed:
+        render_eye_prediction_summary_two_col("left", computed["left"])
+else:
+    render_eye_prediction_summary_two_col(primary_eye, computed[primary_eye])
 
 st.divider()
 
-# ---------------------------
-# Explainability + Controls + Saved Cases
-# ---------------------------
-left, right = st.columns([2.2, 1.0], gap="large")
+st.subheader("Why did the model predict this?")
 
-with right:
-    st.subheader("Explainability Controls")
+_, switch_mid, _ = st.columns([1, 6.8, 1])
 
-    st.selectbox(
-        "Explainability method",
-        options=["GradCAM++", "ScoreCAM"],
-        key="analysis_cam_method",
-        help="GradCAM++ is the baseline. ScoreCAM is slower but useful for comparison.",
+with switch_mid:
+    st.markdown(
+        '<div class="switch-note">Switch between classifier explainability and segmentation-based lesion views.</div>',
+        unsafe_allow_html=True,
     )
 
-    st.selectbox(
-        "Generate heatmap for class",
-        options=list(range(utils.NUM_CLASSES)),
-        format_func=lambda i: utils.CLASS_NAMES[i],
-        key="analysis_target_class",
+    view_mode = st.radio(
+        "View Mode",
+        options=[
+            "Original",
+            "Explainability",
+            "Exudates (EX)",
+            "Haemorrhages (HE)",
+        ],
+        key="analysis_view_mode",
+        horizontal=True,
+        label_visibility="collapsed",
     )
 
-    st.slider(
-        "Overlay strength",
-        min_value=0.10,
-        max_value=0.80,
-        step=0.05,
-        key="analysis_alpha",
-    )
+st.markdown("")
 
-    with st.expander("Advanced Settings"):
-        st.caption("Use these only for research/debugging. Auto is recommended.")
+show_side_controls = view_mode == "Explainability" and analysis_input_mode == "single"
 
-        if layer_names:
-            st.selectbox(
-                "Target layer",
-                options=["(auto)"] + layer_names,
-                key="analysis_target_layer",
-                help="Manual layer selection is mainly for explainability experiments.",
-            )
-        else:
-            st.session_state.analysis_target_layer = "(auto)"
-            st.caption("No Conv2D layers detected.")
-
-    st.markdown("---")
-    st.subheader("Saved Cases")
-    cases = utils.load_recent_cases(limit=15)
-    if cases:
-        st.write(f"Recent saved: **{len(cases)}**")
-        with st.expander("Show recent cases"):
-            for c in cases[:10]:
-                cam_label = c.get("cam_method", "GradCAM++")
-                st.write(f"- {c['timestamp']} — **{c['pred_name']}** — {cam_label} — {c['filename_hint']}")
-    else:
-        st.caption("No saved cases yet.")
+if show_side_controls:
+    left, right = st.columns([2.0, 0.95], gap="large")
+else:
+    left = st.container()
+    right = None
 
 with left:
-    st.subheader("Why did the model predict this?")
-    st.caption(f"{cam_method_ui} highlights regions contributing to the selected class score.")
+    if analysis_input_mode == "single":
+        c = computed[primary_eye]
 
-    c1, c2, c3 = st.columns(3, gap="medium")
-    with c1:
-        st.markdown("### Input")
-        st.image(raw_rgb, use_container_width=True)
-    with c2:
-        st.markdown(f"### {cam_method_ui} Heatmap")
-        st.image(heatmap_rgb, use_container_width=True)
-    with c3:
-        st.markdown(f"### {cam_method_ui} Overlay")
-        st.image(overlay_rgb, use_container_width=True)
+        if view_mode == "Original":
+            render_original_single(c, primary_eye)
+        elif view_mode == "Explainability":
+            render_explainability_single(c, primary_eye)
+        elif view_mode == "Exudates (EX)":
+            render_ex_single(c, primary_eye)
+        elif view_mode == "Haemorrhages (HE)":
+            render_he_single(c, primary_eye)
+    else:
+        if view_mode == "Original":
+            render_original_pair(computed)
+        elif view_mode == "Explainability":
+            render_explainability_pair_vertical(computed)
+        elif view_mode == "Exudates (EX)":
+            render_ex_pair(computed)
+        elif view_mode == "Haemorrhages (HE)":
+            render_he_pair(computed)
+
+if show_side_controls and right is not None:
+    with right:
+        st.subheader("Explainability Controls")
+        render_eye_controls(primary_eye)
+
+st.markdown("---")
+st.subheader("Saved Cases")
+st.caption("Last 5 persistent cases. These remain available even after you close and reopen the app.")
+
+saved_cases = list_saved_cases(limit=5)
+
+if saved_cases:
+    for idx, case in enumerate(saved_cases):
+        col_a, col_b = st.columns([5.5, 1.15], gap="large")
+
+        with col_a:
+            st.markdown(render_saved_case_card(case, idx), unsafe_allow_html=True)
+
+        with col_b:
+            st.markdown("<div style='height: 18px;'></div>", unsafe_allow_html=True)
+            if st.button(
+                "Open",
+                key=f"analysis_open_saved_{case['patient_id']}_{case['case_id']}",
+                use_container_width=True,
+            ):
+                open_saved_case(case["patient_id"], case["case_id"])
+                st.rerun()
+else:
+    st.caption("No saved cases yet.")
 
 st.divider()
+st.info("Research demo only — not medical advice. Explainability and lesion masks are support outputs, not clinical truth.")
 
-# Bottom reminder
-st.info("⚠ Research demo only — not medical advice. Heatmaps show model attention, not clinical truth.")
+if st.session_state.show_pdf_dialog:
+    render_pdf_report_dialog(
+        computed=computed,
+        available_eyes=available_eyes,
+        analysis_input_mode=analysis_input_mode,
+    )
+
+if st.session_state.show_save_case_dialog:
+    render_save_case_dialog(
+        analysis_input_mode=analysis_input_mode,
+        primary_eye=primary_eye,
+    )

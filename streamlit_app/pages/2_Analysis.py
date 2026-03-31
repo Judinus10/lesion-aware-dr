@@ -40,10 +40,51 @@ st.set_page_config(page_title="Analysis", layout="wide")
 apply_analysis_styles()
 
 
-def open_saved_case(patient_id: str, case_id: str):
-    loaded = load_case_bundle(patient_id, case_id)
-    apply_case_to_session(st.session_state, loaded)
+def toast_success(message: str):
+    st.toast(message, icon="✅")
 
+
+def toast_warning(message: str):
+    st.toast(message, icon="⚠️")
+
+
+def toast_error(message: str):
+    st.toast(message, icon="❌")
+
+
+def toast_info(message: str):
+    st.toast(message, icon="ℹ️")
+
+
+def queue_open_saved_case(case_id: str):
+    loaded = load_case_bundle(case_id)
+    st.session_state.pending_loaded_case = loaded
+    st.session_state.analysis_page_toast = {
+        "level": "success",
+        "message": f"Opened saved case {case_id}.",
+    }
+
+
+# ---------- APPLY PENDING CASE BEFORE ANY WIDGET WITH SAME KEYS ----------
+if "pending_loaded_case" in st.session_state:
+    loaded_case = st.session_state.pop("pending_loaded_case")
+    apply_case_to_session(st.session_state, loaded_case)
+
+# ---------- TOASTS ----------
+if "analysis_page_toast" in st.session_state:
+    toast = st.session_state.pop("analysis_page_toast")
+    level = toast.get("level", "info")
+    message = toast.get("message", "")
+
+    if message:
+        if level == "success":
+            toast_success(message)
+        elif level == "warning":
+            toast_warning(message)
+        elif level == "error":
+            toast_error(message)
+        else:
+            toast_info(message)
 
 analysis_input_mode, eye_results = prepare_eye_results_from_legacy()
 
@@ -180,6 +221,8 @@ saved_cases = list_saved_cases(limit=5)
 
 if saved_cases:
     for idx, case in enumerate(saved_cases):
+        case_id = case.get("case_id", f"case_{idx + 1}")
+
         col_a, col_b = st.columns([5.5, 1.15], gap="large")
 
         with col_a:
@@ -189,11 +232,14 @@ if saved_cases:
             st.markdown("<div style='height: 18px;'></div>", unsafe_allow_html=True)
             if st.button(
                 "Open",
-                key=f"analysis_open_saved_{case['patient_id']}_{case['case_id']}",
+                key=f"analysis_open_saved_{case_id}",
                 use_container_width=True,
             ):
-                open_saved_case(case["patient_id"], case["case_id"])
-                st.rerun()
+                try:
+                    queue_open_saved_case(case_id)
+                    st.rerun()
+                except Exception as e:
+                    toast_error(f"Failed to open saved case: {e}")
 else:
     st.caption("No saved cases yet.")
 

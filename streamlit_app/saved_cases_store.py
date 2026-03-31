@@ -97,8 +97,17 @@ def save_case_bundle(
     eye_results: Dict[str, Dict[str, Any]],
     analysis_input_mode: str,
     primary_eye: str,
+    patient_id: str,
+    patient_name: str = "",
+    age: Any = "",
+    gender: str = "",
+    notes: str = "",
     max_cases: int = 5,
 ) -> Dict[str, Any]:
+    patient_id = str(patient_id).strip()
+    if not patient_id:
+        raise ValueError("Patient ID is required.")
+
     case_id = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     cdir = _case_dir(case_id)
     cdir.mkdir(parents=True, exist_ok=True)
@@ -114,6 +123,11 @@ def save_case_bundle(
         "analysis_input_mode": analysis_input_mode,
         "primary_eye": primary_eye,
         "available_eyes": [eye for eye in ["right", "left"] if eye in eyes_payload],
+        "patient_id": patient_id,
+        "patient_name": str(patient_name).strip(),
+        "age": "" if age is None else str(age).strip(),
+        "gender": str(gender).strip(),
+        "notes": str(notes).strip(),
         "eyes": eyes_payload,
     }
     meta["summary"] = _build_summary(meta)
@@ -166,20 +180,39 @@ def load_case_bundle(case_id: str) -> Dict[str, Any]:
         "analysis_input_mode": meta.get("analysis_input_mode", "single"),
         "primary_eye": meta.get("primary_eye", "right"),
         "available_eyes": meta.get("available_eyes", []),
+        "patient_id": meta.get("patient_id", ""),
+        "patient_name": meta.get("patient_name", ""),
+        "age": meta.get("age", ""),
+        "gender": meta.get("gender", ""),
+        "notes": meta.get("notes", ""),
         "eye_results": eye_results,
         "summary": meta.get("summary", ""),
     }
 
 
+def delete_case_bundle(case_id: str) -> bool:
+    case_path = _case_dir(case_id)
+    if not case_path.exists() or not case_path.is_dir():
+        return False
+
+    shutil.rmtree(case_path, ignore_errors=False)
+    return True
+
+
 def apply_case_to_session(session_state, loaded_case: Dict[str, Any]) -> None:
-    session_state.eye_results = loaded_case["eye_results"]
-    session_state.analysis_input_mode = loaded_case.get("analysis_input_mode", "single")
-    session_state.primary_eye = loaded_case.get("primary_eye", "right")
-    session_state.analysis_view_mode = "Original"
+    session_state["eye_results"] = loaded_case["eye_results"]
+    session_state["analysis_input_mode"] = loaded_case.get("analysis_input_mode", "single")
+    session_state["primary_eye"] = loaded_case.get("primary_eye", "right")
+    session_state["saved_case_id"] = loaded_case.get("case_id", "")
+    session_state["saved_case_patient_id"] = loaded_case.get("patient_id", "")
+    session_state["saved_case_patient_name"] = loaded_case.get("patient_name", "")
+    session_state["saved_case_age"] = loaded_case.get("age", "")
+    session_state["saved_case_gender"] = loaded_case.get("gender", "")
+    session_state["saved_case_notes"] = loaded_case.get("notes", "")
 
     available = loaded_case.get("available_eyes", [])
     if len(available) == 1:
         one_eye = available[0]
-        session_state.last_result = loaded_case["eye_results"][one_eye]
+        session_state["last_result"] = loaded_case["eye_results"][one_eye]
     else:
-        session_state.last_result = None
+        session_state["last_result"] = None

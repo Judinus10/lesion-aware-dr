@@ -7,6 +7,22 @@ from pdf_report import build_pdf_report
 from saved_cases_store import save_case_bundle
 
 
+def toast_success(message: str):
+    st.toast(message, icon="✅")
+
+
+def toast_warning(message: str):
+    st.toast(message, icon="⚠️")
+
+
+def toast_error(message: str):
+    st.toast(message, icon="❌")
+
+
+def toast_info(message: str):
+    st.toast(message, icon="ℹ️")
+
+
 def save_current_case(analysis_input_mode: str, primary_eye: str):
     patient_id = st.session_state.save_patient_id.strip()
     if not patient_id:
@@ -80,9 +96,14 @@ def render_save_case_dialog(analysis_input_mode: str, primary_eye: str):
             if st.button("Confirm Save", key="confirm_save_case_btn", use_container_width=True):
                 try:
                     saved = save_current_case(analysis_input_mode, primary_eye)
-                    st.success(f"Saved. Patient ID: {saved['patient_id']} | {saved['summary']}")
+                    st.session_state.show_save_case_dialog = False
+                    st.session_state.analysis_page_toast = {
+                        "level": "success",
+                        "message": f"Saved. Patient ID: {saved['patient_id']} | {saved['summary']}",
+                    }
+                    st.rerun()
                 except Exception as e:
-                    st.error(str(e))
+                    toast_error(str(e))
 
         with b2:
             if st.button("Close", key="close_save_case_btn", use_container_width=True):
@@ -145,7 +166,7 @@ def render_pdf_report_dialog(
                 file_name = f"dr_report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pdf"
                 st.session_state.generated_pdf_bytes = pdf_bytes
                 st.session_state.generated_pdf_name = file_name
-                st.success("PDF generated. Download it below.")
+                toast_success("PDF generated. Download it below.")
 
         with btn2:
             if st.button("Close", key="close_pdf_dialog_btn", use_container_width=True):

@@ -1,7 +1,12 @@
 import time
 import streamlit as st
 
-from saved_cases_store import list_saved_cases, load_case_bundle, apply_case_to_session
+from saved_cases_store import (
+    apply_case_to_session,
+    delete_case_bundle,
+    list_saved_cases,
+    load_case_bundle,
+)
 
 
 st.set_page_config(page_title="Saved Cases", layout="wide")
@@ -87,13 +92,13 @@ def show_loader(message: str = "Loading..."):
 
 # ---------------- CARD HTML ----------------
 def render_saved_case_card(case: dict, idx: int) -> str:
-    patient_id = case.get("patient_id", "-")
-    patient_name = case.get("patient_name", "-")
-    age = case.get("age", "-")
-    saved_at = case.get("saved_at", "-")
-    gender = case.get("gender", "-")
+    patient_id = case.get("patient_id") or "-"
+    patient_name = case.get("patient_name") or "-"
+    age = case.get("age") or "-"
+    saved_at = case.get("saved_at") or "-"
+    gender = case.get("gender") or "-"
     mode = str(case.get("analysis_input_mode", "-")).title()
-    summary = case.get("summary", "-")
+    summary = case.get("summary") or "-"
 
     return f"""
     <div class="saved-card">
@@ -199,16 +204,13 @@ st.markdown(
           word-break: break-word;
       }
 
-      .saved-open-wrap {
+      .saved-actions-wrap {
           display: flex;
+          flex-direction: column;
           justify-content: center;
-          align-items: center;
+          gap: 0.55rem;
           height: 100%;
           min-height: 100%;
-      }
-
-      .saved-case-block {
-          margin-bottom: 1rem;
       }
 
       .saved-divider {
@@ -248,7 +250,6 @@ if "saved_cases_page_toast" in st.session_state:
             toast_info(message)
 
 
-# ---------------- TOP BACK BUTTON ----------------
 st.markdown('<div class="saved-top-space"></div>', unsafe_allow_html=True)
 
 back_col_1, back_col_2, back_col_3 = st.columns([1.15, 2.8, 3.05])
@@ -260,7 +261,6 @@ with back_col_1:
         st.switch_page("pages/1_Dashboard.py")
 
 
-# ---------------- HEADER ----------------
 st.markdown(
     """
     <div class="saved-header">
@@ -276,12 +276,11 @@ st.markdown(
 st.divider()
 
 
-# ---------------- LOAD CASES ----------------
 try:
     saved_cases = list_saved_cases(limit=5)
-except Exception:
+except Exception as e:
     saved_cases = []
-    toast_error("Failed to load saved cases.")
+    toast_error(f"Failed to load saved cases: {e}")
 
 if not saved_cases:
     toast_warning("No saved cases found.")
@@ -296,36 +295,56 @@ if not saved_cases:
     st.stop()
 
 
-# ---------------- RENDER CASES ----------------
 for idx, case in enumerate(saved_cases):
     case_id = case.get("case_id", f"case_{idx + 1}")
-    patient_id = case.get("patient_id", "-")
 
-    row_left, row_right = st.columns([5.1, 1.25], vertical_alignment="center")
+    row_left, row_right = st.columns([5.1, 1.35], vertical_alignment="center")
 
     with row_left:
         st.markdown(render_saved_case_card(case, idx), unsafe_allow_html=True)
 
     with row_right:
-        st.markdown('<div class="saved-open-wrap">', unsafe_allow_html=True)
+        st.markdown('<div class="saved-actions-wrap">', unsafe_allow_html=True)
+
         if st.button("Open", key=f"open_case_{case_id}", use_container_width=True):
             try:
-                loaded = load_case_bundle(patient_id, case_id)
+                loaded = load_case_bundle(case_id)
 
                 if not loaded:
                     toast_error("Selected case could not be loaded.")
                 else:
                     show_loader("Opening saved case...")
-                    apply_case_to_session(st.session_state, loaded)
-                    st.session_state.saved_cases_page_toast = {
+                    st.session_state["pending_loaded_case"] = loaded
+                    st.session_state["analysis_page_toast"] = {
                         "level": "success",
                         "message": f"Opened Case {idx + 1}.",
                     }
                     time.sleep(0.45)
                     st.switch_page("pages/2_Analysis.py")
+            except Exception as e:
+                toast_error(f"Something went wrong while opening the saved case: {e}")
 
-            except Exception:
-                toast_error("Something went wrong while opening the saved case.")
+        if st.button("Delete", key=f"delete_case_{case_id}", use_container_width=True):
+            try:
+                show_loader("Deleting saved case...")
+                deleted = delete_case_bundle(case_id)
+
+                if deleted:
+                    st.session_state.saved_cases_page_toast = {
+                        "level": "success",
+                        "message": f"Deleted Case {idx + 1}.",
+                    }
+                else:
+                    st.session_state.saved_cases_page_toast = {
+                        "level": "warning",
+                        "message": "Saved case folder was not found.",
+                    }
+
+                time.sleep(0.35)
+                st.rerun()
+            except Exception as e:
+                toast_error(f"Failed to delete saved case: {e}")
+
         st.markdown("</div>", unsafe_allow_html=True)
 
     if idx < len(saved_cases) - 1:

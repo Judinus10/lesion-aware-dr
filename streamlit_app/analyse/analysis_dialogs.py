@@ -186,7 +186,6 @@ def render_save_case_dialog(analysis_input_mode: str, primary_eye: str):
                 unsafe_allow_html=True,
             )
 
-        # ---------- ROW 1 : Patient ID | Gender ----------
         row1_col1, row1_col2 = st.columns([1, 1], gap="small")
 
         with row1_col1:
@@ -215,7 +214,6 @@ def render_save_case_dialog(analysis_input_mode: str, primary_eye: str):
                     unsafe_allow_html=True,
                 )
 
-        # ---------- ROW 2 : Patient Name | Age ----------
         row2_col1, row2_col2 = st.columns([1, 1], gap="small")
 
         with row2_col1:
@@ -240,7 +238,6 @@ def render_save_case_dialog(analysis_input_mode: str, primary_eye: str):
                     unsafe_allow_html=True,
                 )
 
-        # ---------- ROW 3 : Notes ----------
         st.text_area("Notes", key="save_patient_notes", height=110)
 
         st.markdown("---")
@@ -288,20 +285,6 @@ def render_pdf_report_dialog(
 ):
     @st.dialog("PDF Report Options")
     def _dialog():
-        # ---------- DEFAULT PDF CHECKBOX STATES ----------
-        st.session_state.setdefault("pdf_include_report_details", True)
-        st.session_state.setdefault("pdf_include_prediction_summary", True)
-        st.session_state.setdefault("pdf_include_probabilities", True)
-        st.session_state.setdefault("pdf_include_disclaimer", True)
-
-        st.session_state.setdefault("pdf_include_original_image", False)
-        st.session_state.setdefault("pdf_include_gradcam_heatmap", False)
-        st.session_state.setdefault("pdf_include_gradcam_overlay", False)
-        st.session_state.setdefault("pdf_include_exudates_mask", False)
-        st.session_state.setdefault("pdf_include_exudates_overlay", False)
-        st.session_state.setdefault("pdf_include_haemorrhages_mask", False)
-        st.session_state.setdefault("pdf_include_haemorrhages_overlay", False)
-
         st.write("Choose what should be included in the report before generating the PDF.")
 
         st.text_input("Report title", key="pdf_report_title")
@@ -321,12 +304,35 @@ def render_pdf_report_dialog(
         st.text_area("Notes", key="pdf_notes", height=100)
 
         st.markdown("### Include sections")
+
+        # Set defaults BEFORE rendering widgets, never after.
+        st.session_state["pdf_include_report_details"] = True
+        st.session_state["pdf_include_prediction_summary"] = True
+        st.session_state["pdf_include_probabilities"] = True
+        st.session_state["pdf_include_disclaimer"] = True
+
+        if "pdf_include_original_image" not in st.session_state:
+            st.session_state["pdf_include_original_image"] = False
+        if "pdf_include_gradcam_heatmap" not in st.session_state:
+            st.session_state["pdf_include_gradcam_heatmap"] = False
+        if "pdf_include_gradcam_overlay" not in st.session_state:
+            st.session_state["pdf_include_gradcam_overlay"] = False
+        if "pdf_include_exudates_mask" not in st.session_state:
+            st.session_state["pdf_include_exudates_mask"] = False
+        if "pdf_include_exudates_overlay" not in st.session_state:
+            st.session_state["pdf_include_exudates_overlay"] = False
+        if "pdf_include_haemorrhages_mask" not in st.session_state:
+            st.session_state["pdf_include_haemorrhages_mask"] = False
+        if "pdf_include_haemorrhages_overlay" not in st.session_state:
+            st.session_state["pdf_include_haemorrhages_overlay"] = False
+
         s1, s2 = st.columns([1, 1], gap="large")
         with s1:
             st.checkbox("Report details", key="pdf_include_report_details")
             st.checkbox("Prediction summary", key="pdf_include_prediction_summary")
             st.checkbox("Class probabilities", key="pdf_include_probabilities")
             st.checkbox("Disclaimer", key="pdf_include_disclaimer")
+
         with s2:
             st.checkbox("Original image", key="pdf_include_original_image")
             st.checkbox("Grad-CAM heatmap", key="pdf_include_gradcam_heatmap")

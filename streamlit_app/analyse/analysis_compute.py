@@ -31,6 +31,32 @@ def prepare_eye_results_from_legacy() -> Tuple[str, Dict]:
     return analysis_input_mode, eye_results
 
 
+def reset_pdf_dialog_defaults(force: bool = False) -> None:
+    defaults = {
+        "pdf_report_title": "DR Analysis Report",
+        "pdf_patient_name": "",
+        "pdf_patient_id": "",
+        "pdf_clinician_name": "",
+        "pdf_institution_name": "",
+        "pdf_notes": "",
+        "pdf_include_report_details": True,
+        "pdf_include_prediction_summary": True,
+        "pdf_include_probabilities": True,
+        "pdf_include_original_image": False,
+        "pdf_include_gradcam_heatmap": False,
+        "pdf_include_gradcam_overlay": False,
+        "pdf_include_exudates_mask": False,
+        "pdf_include_exudates_overlay": False,
+        "pdf_include_haemorrhages_mask": False,
+        "pdf_include_haemorrhages_overlay": False,
+        "pdf_include_disclaimer": True,
+    }
+
+    for key, value in defaults.items():
+        if force or key not in st.session_state:
+            st.session_state[key] = value
+
+
 def ensure_analysis_session_defaults(eye_results: Dict) -> None:
     if "analysis_view_mode" not in st.session_state:
         st.session_state.analysis_view_mode = "Original"
@@ -62,28 +88,7 @@ def ensure_analysis_session_defaults(eye_results: Dict) -> None:
         if key not in st.session_state:
             st.session_state[key] = value
 
-    pdf_defaults = {
-        "pdf_report_title": "DR Analysis Report",
-        "pdf_patient_name": "",
-        "pdf_patient_id": "",
-        "pdf_clinician_name": "",
-        "pdf_institution_name": "",
-        "pdf_notes": "",
-        "pdf_include_report_details": True,
-        "pdf_include_prediction_summary": True,
-        "pdf_include_probabilities": True,
-        "pdf_include_original_image": False,
-        "pdf_include_gradcam_heatmap": True,
-        "pdf_include_gradcam_overlay": True,
-        "pdf_include_exudates_mask": False,
-        "pdf_include_exudates_overlay": True,
-        "pdf_include_haemorrhages_mask": False,
-        "pdf_include_haemorrhages_overlay": True,
-        "pdf_include_disclaimer": True,
-    }
-    for key, value in pdf_defaults.items():
-        if key not in st.session_state:
-            st.session_state[key] = value
+    reset_pdf_dialog_defaults(force=False)
 
     for eye in ["right", "left"]:
         if eye in eye_results:

@@ -190,6 +190,33 @@ def load_case_bundle(case_id: str) -> Dict[str, Any]:
     }
 
 
+def update_case_details(
+    case_id: str,
+    *,
+    patient_id: str,
+    patient_name: str = "",
+    age: Any = "",
+    gender: str = "",
+    notes: str = "",
+) -> Dict[str, Any]:
+    meta = _read_meta(case_id)
+    if not meta:
+        raise FileNotFoundError(f"Saved case not found: {case_id}")
+
+    patient_id = str(patient_id).strip()
+    if not patient_id:
+        raise ValueError("Patient ID is required.")
+
+    meta["patient_id"] = patient_id
+    meta["patient_name"] = str(patient_name).strip()
+    meta["age"] = "" if age is None else str(age).strip()
+    meta["gender"] = str(gender).strip()
+    meta["notes"] = str(notes).strip()
+
+    _write_meta(case_id, meta)
+    return meta
+
+
 def delete_case_bundle(case_id: str) -> bool:
     case_path = _case_dir(case_id)
     if not case_path.exists() or not case_path.is_dir():

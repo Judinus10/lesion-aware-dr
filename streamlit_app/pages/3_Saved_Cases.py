@@ -6,6 +6,7 @@ from saved_cases_store import (
     delete_case_bundle,
     list_saved_cases,
     load_case_bundle,
+    update_case_details,
 )
 
 
@@ -88,6 +89,76 @@ def show_loader(message: str = "Loading..."):
         """,
         unsafe_allow_html=True,
     )
+
+
+# ---------------- EDIT DIALOG ----------------
+def render_edit_case_dialog(case: dict, idx: int):
+    case_id = case.get("case_id", "")
+    edit_key_prefix = f"edit_case_{case_id}"
+
+    @st.dialog("Edit Patient Details")
+    def _dialog():
+        st.write("Edit patient details only. Eye images and prediction results cannot be changed here.")
+
+        patient_id_default = case.get("patient_id", "") or ""
+        patient_name_default = case.get("patient_name", "") or ""
+        age_default = case.get("age", "") or ""
+        gender_default = case.get("gender", "") or ""
+        notes_default = case.get("notes", "") or ""
+
+        c1, c2 = st.columns(2)
+        with c1:
+            patient_id = st.text_input("Patient ID *", value=patient_id_default, key=f"{edit_key_prefix}_patient_id")
+            patient_name = st.text_input("Patient Name", value=patient_name_default, key=f"{edit_key_prefix}_patient_name")
+            age = st.text_input("Age", value=age_default, key=f"{edit_key_prefix}_age")
+        with c2:
+            gender_options = ["", "Male", "Female", "Other"]
+            try:
+                gender_index = gender_options.index(gender_default)
+            except ValueError:
+                gender_index = 0
+
+            gender = st.selectbox(
+                "Gender",
+                options=gender_options,
+                index=gender_index,
+                key=f"{edit_key_prefix}_gender",
+            )
+            notes = st.text_area("Notes", value=notes_default, height=120, key=f"{edit_key_prefix}_notes")
+
+        st.markdown("---")
+        b1, b2 = st.columns(2)
+
+        with b1:
+            if st.button("Save Changes", key=f"{edit_key_prefix}_save_btn", use_container_width=True):
+                try:
+                    if not str(patient_id).strip():
+                        toast_warning("Patient ID is required.")
+                        return
+
+                    show_loader("Updating patient details...")
+                    update_case_details(
+                        case_id,
+                        patient_id=str(patient_id).strip(),
+                        patient_name=str(patient_name).strip(),
+                        age=str(age).strip(),
+                        gender=str(gender).strip(),
+                        notes=str(notes).strip(),
+                    )
+                    st.session_state.saved_cases_page_toast = {
+                        "level": "success",
+                        "message": f"Updated Case {idx + 1} details.",
+                    }
+                    time.sleep(0.35)
+                    st.rerun()
+                except Exception as e:
+                    toast_error(f"Failed to update patient details: {e}")
+
+        with b2:
+            if st.button("Close", key=f"{edit_key_prefix}_close_btn", use_container_width=True):
+                st.rerun()
+
+    _dialog()
 
 
 # ---------------- CARD HTML ----------------
@@ -323,6 +394,9 @@ for idx, case in enumerate(saved_cases):
                     st.switch_page("pages/2_Analysis.py")
             except Exception as e:
                 toast_error(f"Something went wrong while opening the saved case: {e}")
+
+        if st.button("Edit", key=f"edit_case_{case_id}", use_container_width=True):
+            render_edit_case_dialog(case, idx)
 
         if st.button("Delete", key=f"delete_case_{case_id}", use_container_width=True):
             try:
